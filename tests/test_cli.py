@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from forge.agent import AgentStatus, PlanStep, PlanStepStatus, TaskPlan
+from forge.agent.verification import VerificationStatus
 from forge.cli import main
 
 
@@ -62,6 +63,7 @@ def test_cli_displays_plan_status_updates(monkeypatch, capsys, tmp_path) -> None
         final_answer="Architecture summary",
         max_steps=12,
         plan_history=[plan],
+        verification_status=VerificationStatus.PASSED,
     )
 
     with (
@@ -78,3 +80,4 @@ def test_cli_displays_plan_status_updates(monkeypatch, capsys, tmp_path) -> None
     assert "Plan status updates:" in captured.err
     assert "[completed] inspect" in captured.err
     assert "[in_progress] explain" in captured.err
+    assert "VERIFIED" in captured.err

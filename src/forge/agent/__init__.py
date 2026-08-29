@@ -15,6 +15,11 @@ from forge.agent.plan import (
     update_plan_tool,
 )
 from forge.agent.state import AgentState, AgentStatus
+from forge.agent.verification import (
+    VerificationRecord,
+    VerificationStatus,
+    VerificationTracker,
+)
 
 __all__ = [
     "AgentLoop",
@@ -29,4 +34,7 @@ __all__ = [
     "PlanStore",
     "TaskPlan",
     "update_plan_tool",
+    "VerificationRecord",
+    "VerificationStatus",
+    "VerificationTracker",
 ]

@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from forge.agent import AgentLoop, AgentStatus, TaskPlan
+from forge.agent.verification import VerificationStatus
 from forge.config import ConfigurationError, ForgeConfig
 from forge.llm import ModelCommunicationError, OpenAIResponsesClient
 from forge.tools import create_coding_registry
@@ -48,11 +49,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     _print_plan_history(getattr(state, "plan_history", ()))
     if state.status is AgentStatus.MAX_STEPS:
         print(
-            f"Forge stopped after reaching max_steps={state.max_steps}.",
+            f"INCOMPLETE: Forge stopped after reaching max_steps={state.max_steps}.",
             file=sys.stderr,
         )
         return 2
 
+    if getattr(state, "verification_status", None) is VerificationStatus.PASSED:
+        print("VERIFIED", file=sys.stderr)
     print(state.final_answer or "")
     return 0
 

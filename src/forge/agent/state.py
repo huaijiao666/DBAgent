@@ -9,6 +9,10 @@ from typing import Any
 
 from forge.agent.context import ContextUsage
 from forge.agent.plan import TaskPlan
+from forge.agent.verification import (
+    VerificationRecord,
+    VerificationStatus,
+)
 from forge.llm import FunctionCall
 from forge.tools import ToolObservation
 
@@ -35,7 +39,19 @@ class AgentState:
     context_usage: list[ContextUsage] = field(default_factory=list)
     plan: TaskPlan | None = None
     plan_history: list[TaskPlan] = field(default_factory=list)
+    latest_verification: VerificationRecord | None = None
+    verification_history: list[VerificationRecord] = field(default_factory=list)
+    verification_status: VerificationStatus = VerificationStatus.NOT_RUN
+    repeated_failure_count: int = 0
+    no_progress_rounds: int = 0
+    recovery_hints: list[str] = field(default_factory=list)
     final_answer: str | None = None
+
+    @property
+    def is_verified(self) -> bool:
+        """Return whether current files have passing deterministic evidence."""
+
+        return self.verification_status is VerificationStatus.PASSED
 
     @classmethod
     def start(cls, *, task: str, workspace: Path, max_steps: int) -> AgentState:

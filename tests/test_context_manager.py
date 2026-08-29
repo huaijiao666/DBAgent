@@ -87,6 +87,8 @@ def test_context_categories_and_usage_are_explicit_and_bounded() -> None:
     assert set(snapshot.usage.category_characters) == {
         "persistent_task",
         "current_plan",
+        "latest_verification",
+        "runtime_guidance",
         "repository_map",
         "relevant_code",
         "compact_observations",
