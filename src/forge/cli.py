@@ -11,7 +11,9 @@ from forge.agent import AgentLoop, AgentStatus, TaskPlan
 from forge.agent.verification import VerificationStatus
 from forge.config import ConfigurationError, ForgeConfig
 from forge.llm import ModelCommunicationError, OpenAIResponsesClient
+from forge.trace import TraceRecorder
 from forge.tools import create_coding_registry
+from forge.workspace import Workspace
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -31,20 +33,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=12,
         help="Maximum model turns before hard termination (default: 12).",
     )
+    parser.add_argument(
+        "--trace-file",
+        type=Path,
+        default=None,
+        help="JSONL trace path relative to the workspace (default: .forge/trace.jsonl).",
+    )
     arguments = parser.parse_args(argv)
 
+    trace = None
     try:
         config = ForgeConfig.from_env()
+        workspace_root = Workspace(arguments.workspace).root
+        trace_path = _resolve_trace_path(workspace_root, arguments.trace_file)
+        trace = TraceRecorder(trace_path, workspace=workspace_root, console=True)
         model_client = OpenAIResponsesClient(config)
         registry = create_coding_registry(arguments.workspace)
         state = AgentLoop(
             model_client,
             registry,
             max_steps=arguments.max_steps,
+            trace=trace,
         ).run(arguments.task, workspace=arguments.workspace)
     except (ConfigurationError, ModelCommunicationError, OSError, ValueError) as error:
         print(f"Forge failed: {error}", file=sys.stderr)
         return 1
+    finally:
+        if trace is not None:
+            trace.close()
 
     _print_plan_history(getattr(state, "plan_history", ()))
     if state.status is AgentStatus.MAX_STEPS:
@@ -80,6 +96,19 @@ def _positive_integer(value: str) -> int:
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be a positive integer")
     return parsed
+
+
+def _resolve_trace_path(workspace: Path, user_path: Path | None) -> Path:
+    candidate = user_path or Path(".forge") / "trace.jsonl"
+    candidate = candidate if candidate.is_absolute() else workspace / candidate
+    resolved = candidate.resolve(strict=False)
+    try:
+        resolved.relative_to(workspace)
+    except ValueError as error:
+        raise ValueError("trace file must be inside the workspace") from error
+    if resolved == workspace or resolved.exists() and resolved.is_dir():
+        raise ValueError("trace file must be a file path")
+    return resolved
 
 
 if __name__ == "__main__":

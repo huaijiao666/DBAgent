@@ -15,6 +15,7 @@ MAX_REPOSITORY_FILES = 20_000
 _IGNORED_DIRECTORY_NAMES = frozenset(
     {
         ".git",
+        ".forge",
         ".hg",
         ".mypy_cache",
         ".pytest_cache",

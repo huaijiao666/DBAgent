@@ -9,6 +9,7 @@ from forge.agent import (
     VerificationTracker,
 )
 from forge.llm import FunctionCall, ModelResponse
+from forge.trace import TraceRecorder
 from forge.tools import ToolObservation, create_coding_registry
 
 
@@ -115,11 +116,17 @@ def test_failed_test_feedback_then_second_patch_is_verified(tmp_path: Path) -> N
         ]
     )
 
-    state = AgentLoop(
-        model,
-        create_coding_registry(workspace),
-        max_steps=8,
-    ).run("Fix the calculator bug and verify it.", workspace=workspace)
+    trace_path = tmp_path / "trace.jsonl"
+    trace = TraceRecorder(trace_path, workspace=workspace)
+    try:
+        state = AgentLoop(
+            model,
+            create_coding_registry(workspace),
+            max_steps=8,
+            trace=trace,
+        ).run("Fix the calculator bug and verify it.", workspace=workspace)
+    finally:
+        trace.close()
 
     assert state.status is AgentStatus.COMPLETED
     assert state.verification_status is VerificationStatus.PASSED
@@ -130,6 +137,19 @@ def test_failed_test_feedback_then_second_patch_is_verified(tmp_path: Path) -> N
     assert "return left + right" in (workspace / "calculator.py").read_text(
         encoding="utf-8"
     )
+    events = [
+        json.loads(line)["event"]
+        for line in trace_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert {
+        "model_request",
+        "model_response",
+        "tool_start",
+        "tool_result",
+        "patch_applied",
+        "verification",
+        "final",
+    } <= set(events)
 
 
 def test_final_claim_without_current_evidence_becomes_incomplete(
