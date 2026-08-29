@@ -15,7 +15,7 @@ def test_cli_prints_completed_answer(monkeypatch, capsys, tmp_path) -> None:
 
     with (
         patch("forge.cli.OpenAIResponsesClient"),
-        patch("forge.cli.create_readonly_registry"),
+        patch("forge.cli.create_coding_registry"),
         patch("forge.cli.AgentLoop") as loop_type,
     ):
         loop_type.return_value.run.return_value = completed
@@ -35,7 +35,7 @@ def test_cli_reports_max_step_termination(monkeypatch, capsys, tmp_path) -> None
 
     with (
         patch("forge.cli.OpenAIResponsesClient"),
-        patch("forge.cli.create_readonly_registry"),
+        patch("forge.cli.create_coding_registry"),
         patch("forge.cli.AgentLoop") as loop_type,
     ):
         loop_type.return_value.run.return_value = stopped

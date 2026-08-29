@@ -9,7 +9,7 @@ from typing import Any, TypeAlias
 
 from forge.llm import FunctionTool
 
-ToolHandler: TypeAlias = Callable[[Mapping[str, Any]], str]
+ToolHandler: TypeAlias = Callable[[Mapping[str, Any]], Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,7 +27,7 @@ class ToolObservation:
     call_id: str
     tool_name: str
     success: bool
-    content: str
+    content: Any
 
     def to_model_input(self) -> dict[str, str]:
         """Serialize this observation as a Responses API input item."""
@@ -42,3 +42,16 @@ class ToolObservation:
             "call_id": self.call_id,
             "output": output,
         }
+
+
+def object_schema(
+    properties: dict[str, Any], *, required: list[str]
+) -> dict[str, Any]:
+    """Build the strict object schema shared by local function tools."""
+
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": False,
+    }

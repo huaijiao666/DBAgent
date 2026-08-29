@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import Any
 
 from forge.llm import FunctionTool
-from forge.tools.models import ToolDefinition
+from forge.tools.models import ToolDefinition, object_schema
 from forge.tools.registry import ToolRegistry
+from forge.workspace import Workspace
 
 _EXCLUDED_DIRECTORIES = frozenset(
     {".git", ".venv", "venv", "__pycache__", ".pytest_cache", "node_modules"}
@@ -18,34 +19,6 @@ _MAX_LIST_ENTRIES = 2_000
 _MAX_READ_CHARACTERS = 100_000
 _MAX_SEARCH_FILE_BYTES = 1_000_000
 _MAX_SEARCH_MATCHES = 200
-
-
-class Workspace:
-    """Resolve tool paths while enforcing one workspace boundary."""
-
-    def __init__(self, root: Path) -> None:
-        resolved = root.resolve(strict=True)
-        if not resolved.is_dir():
-            raise ValueError(f"workspace is not a directory: {root}")
-        self.root = resolved
-
-    def resolve(self, user_path: str) -> Path:
-        if not isinstance(user_path, str) or not user_path.strip():
-            raise ValueError("path must be a non-empty string")
-        candidate = Path(user_path)
-        if not candidate.is_absolute():
-            candidate = self.root / candidate
-        resolved = candidate.resolve(strict=True)
-        try:
-            relative = resolved.relative_to(self.root)
-        except ValueError as error:
-            raise ValueError(f"path escapes workspace: {user_path}") from error
-        if any(_is_local_environment_name(part) for part in relative.parts):
-            raise PermissionError("access to local environment files is blocked")
-        return resolved
-
-    def relative_name(self, path: Path) -> str:
-        return path.relative_to(self.root).as_posix() or "."
 
 
 def create_readonly_registry(workspace_root: Path) -> ToolRegistry:
@@ -61,7 +34,7 @@ def create_readonly_registry(workspace_root: Path) -> ToolRegistry:
                         "Recursively list files under a workspace-relative path. "
                         "Use '.' for the workspace root."
                     ),
-                    parameters=_object_schema(
+                    parameters=object_schema(
                         {
                             "path": {
                                 "type": "string",
@@ -79,7 +52,7 @@ def create_readonly_registry(workspace_root: Path) -> ToolRegistry:
                     description=(
                         "Read a UTF-8 text file inside the workspace with line numbers."
                     ),
-                    parameters=_object_schema(
+                    parameters=object_schema(
                         {
                             "path": {
                                 "type": "string",
@@ -97,7 +70,7 @@ def create_readonly_registry(workspace_root: Path) -> ToolRegistry:
                     description=(
                         "Case-insensitively search UTF-8 text files for a literal string."
                     ),
-                    parameters=_object_schema(
+                    parameters=object_schema(
                         {
                             "query": {
                                 "type": "string",
@@ -117,17 +90,6 @@ def create_readonly_registry(workspace_root: Path) -> ToolRegistry:
             ),
         ]
     )
-
-
-def _object_schema(
-    properties: dict[str, Any], *, required: list[str]
-) -> dict[str, Any]:
-    return {
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": False,
-    }
 
 
 def _required_string(arguments: Mapping[str, Any], name: str) -> str:

@@ -1,4 +1,4 @@
-"""The first minimal, read-only Coding Agent loop."""
+"""The first minimal Coding Agent loop."""
 
 from __future__ import annotations
 
@@ -9,10 +9,12 @@ from forge.agent.state import AgentState, AgentStatus
 from forge.llm import ModelRequest, ModelResponse
 from forge.tools import ToolRegistry
 
-DEFAULT_AGENT_INSTRUCTIONS = """You are Forge, a read-only coding agent.
-Inspect the local workspace using the provided tools before answering.
-Tool paths are relative to the workspace root. Do not invent file contents.
-When you have enough evidence, answer the user's task without calling a tool.
+DEFAULT_AGENT_INSTRUCTIONS = """You are Forge, a local coding agent.
+Inspect the workspace, reproduce problems, make the smallest necessary edits, and
+verify changes with deterministic commands. Tool paths and command working
+directories are relative to the workspace root. Never claim a command passed
+unless its returned status proves it. When the task is verified, answer without
+calling another tool.
 """
 
 
@@ -21,7 +23,7 @@ class ModelClient(Protocol):
 
 
 class AgentLoop:
-    """Alternate between model responses and local read-only observations."""
+    """Alternate between model responses and local tool observations."""
 
     def __init__(
         self,

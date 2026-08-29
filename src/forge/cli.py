@@ -10,14 +10,14 @@ from pathlib import Path
 from forge.agent import AgentLoop, AgentStatus
 from forge.config import ConfigurationError, ForgeConfig
 from forge.llm import ModelCommunicationError, OpenAIResponsesClient
-from forge.tools import create_readonly_registry
+from forge.tools import create_coding_registry
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Run the minimal read-only Forge coding agent."
+        description="Run the minimal Forge coding agent."
     )
-    parser.add_argument("task", help="Repository inspection task for the agent.")
+    parser.add_argument("task", help="Programming task for the agent.")
     parser.add_argument(
         "--workspace",
         type=Path,
@@ -35,7 +35,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         config = ForgeConfig.from_env()
         model_client = OpenAIResponsesClient(config)
-        registry = create_readonly_registry(arguments.workspace)
+        registry = create_coding_registry(arguments.workspace)
         state = AgentLoop(
             model_client,
             registry,

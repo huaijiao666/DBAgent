@@ -68,6 +68,15 @@ class ToolRegistry:
                 success=False,
                 content=f"{type(error).__name__}: {error}",
             )
+        try:
+            json.dumps(result, ensure_ascii=False)
+        except (TypeError, ValueError) as error:
+            return ToolObservation(
+                call_id=call.call_id,
+                tool_name=call.name,
+                success=False,
+                content=f"Tool returned a non-JSON result: {error}",
+            )
 
         return ToolObservation(
             call_id=call.call_id,
