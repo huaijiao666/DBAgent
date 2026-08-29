@@ -1,6 +1,6 @@
 """Local tool schemas, registration, and implementations."""
 
-from forge.tools.models import ToolDefinition, ToolObservation
+from forge.tools.models import ToolDefinition, ToolObservation, ToolResult
 from forge.tools.coding import create_coding_registry
 from forge.tools.readonly import create_readonly_registry
 from forge.tools.registry import ToolRegistry
@@ -10,6 +10,7 @@ __all__ = [
     "ToolDefinition",
     "ToolObservation",
     "ToolRegistry",
+    "ToolResult",
     "Workspace",
     "create_coding_registry",
     "create_readonly_registry",

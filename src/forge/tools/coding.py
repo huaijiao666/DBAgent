@@ -1,4 +1,4 @@
-"""Transitional write, command, and Git tools for coding tasks."""
+"""Patch, transitional write, command, and Git tools for coding tasks."""
 
 from __future__ import annotations
 
@@ -8,7 +8,8 @@ from typing import Any
 
 from forge.execution import CommandExecutor
 from forge.llm import FunctionTool
-from forge.tools.models import ToolDefinition, object_schema
+from forge.patching import PatchApplier
+from forge.tools.models import ToolDefinition, ToolResult, object_schema
 from forge.tools.readonly import create_readonly_registry
 from forge.tools.registry import ToolRegistry
 from forge.workspace import Workspace
@@ -17,11 +18,27 @@ _MAX_WRITE_CHARACTERS = 200_000
 
 
 def create_coding_registry(workspace_root: Path) -> ToolRegistry:
-    """Create all current read-only and transitional coding tools."""
+    """Create all current local coding tools for one workspace."""
 
     workspace = Workspace(workspace_root)
     executor = CommandExecutor(workspace)
+    patch_applier = PatchApplier(workspace)
     registry = create_readonly_registry(workspace.root)
+    registry.register(
+        ToolDefinition(
+            schema=FunctionTool(
+                name="apply_patch",
+                description=(
+                    "Apply exact, line-based hunks to one or more existing UTF-8 "
+                    "workspace files. Each old_lines sequence must occur exactly once. "
+                    "All files are validated before any change, and handled write "
+                    "failures are rolled back. Prefer this over write_file."
+                ),
+                parameters=_patch_schema(),
+            ),
+            handler=lambda arguments: _apply_patch(patch_applier, arguments),
+        )
+    )
     registry.register(
         ToolDefinition(
             schema=FunctionTool(
@@ -78,7 +95,8 @@ def create_coding_registry(workspace_root: Path) -> ToolRegistry:
             schema=FunctionTool(
                 name="write_file",
                 description=(
-                    "Replace the complete contents of an existing UTF-8 workspace file."
+                    "Replace an entire existing UTF-8 workspace file. Use only when "
+                    "apply_patch cannot express the change safely."
                 ),
                 parameters=_file_write_schema(),
             ),
@@ -117,6 +135,59 @@ def _file_write_schema() -> dict[str, Any]:
     )
 
 
+def _patch_schema() -> dict[str, Any]:
+    line_array = {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "Lines without newline characters.",
+    }
+    hunk = {
+        "type": "object",
+        "properties": {
+            "old_lines": {
+                **line_array,
+                "minItems": 1,
+                "description": (
+                    "Exact consecutive lines that must occur once in the current file."
+                ),
+            },
+            "new_lines": {
+                **line_array,
+                "description": "Replacement lines; use an empty array to delete.",
+            },
+        },
+        "required": ["old_lines", "new_lines"],
+        "additionalProperties": False,
+    }
+    file_patch = {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Workspace-relative path to an existing UTF-8 file.",
+            },
+            "hunks": {
+                "type": "array",
+                "items": hunk,
+                "minItems": 1,
+            },
+        },
+        "required": ["path", "hunks"],
+        "additionalProperties": False,
+    }
+    return object_schema(
+        {
+            "files": {
+                "type": "array",
+                "items": file_patch,
+                "minItems": 1,
+                "description": "All file patches in one atomic operation.",
+            }
+        },
+        required=["files"],
+    )
+
+
 def _run_command(
     executor: CommandExecutor, arguments: Mapping[str, Any]
 ) -> dict[str, object]:
@@ -130,6 +201,13 @@ def _run_command(
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
         raise ValueError("timeout_seconds must be a number")
     return executor.run(command, cwd=cwd, timeout_seconds=timeout).to_dict()
+
+
+def _apply_patch(
+    patch_applier: PatchApplier, arguments: Mapping[str, Any]
+) -> ToolResult:
+    result = patch_applier.apply(arguments.get("files"))
+    return ToolResult(success=bool(result["applied"]), content=result)
 
 
 def _create_file(workspace: Workspace, arguments: Mapping[str, Any]) -> str:

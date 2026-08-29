@@ -21,6 +21,14 @@ class ToolDefinition:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolResult:
+    """Allow a handler to report a structured success or failure explicitly."""
+
+    success: bool
+    content: Any
+
+
+@dataclass(frozen=True, slots=True)
 class ToolObservation:
     """The explicit result of dispatching one model-requested function call."""
 

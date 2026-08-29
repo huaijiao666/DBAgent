@@ -26,6 +26,7 @@ def test_coding_registry_exposes_only_current_tools(tmp_path: Path) -> None:
         "list_files",
         "read_file",
         "search_text",
+        "apply_patch",
         "run_command",
         "create_file",
         "write_file",
@@ -178,16 +179,62 @@ def test_run_command_returns_structured_result(tmp_path: Path) -> None:
     assert observation.content["stderr"] == ""
 
 
+def test_apply_patch_failure_is_a_structured_tool_observation(tmp_path: Path) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("current\n", encoding="utf-8")
+    registry = create_coding_registry(tmp_path)
+
+    observation = _dispatch(
+        registry,
+        "apply_patch",
+        {
+            "files": [
+                {
+                    "path": "target.txt",
+                    "hunks": [
+                        {
+                            "old_lines": ["stale context"],
+                            "new_lines": ["replacement"],
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+
+    assert observation.success is False
+    assert observation.content["applied"] is False
+    assert observation.content["changed_files"] == []
+    assert observation.content["hunks_applied"] == 0
+    assert "context did not match" in observation.content["failure_reason"]
+    assert target.read_text(encoding="utf-8") == "current\n"
+
+
 def test_git_diff_uses_fixed_read_only_commands(tmp_path: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     tracked = tmp_path / "tracked.txt"
     tracked.write_text("before\n", encoding="utf-8")
     subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
-    tracked.write_text("after\n", encoding="utf-8")
     registry = create_coding_registry(tmp_path)
+
+    patch = _dispatch(
+        registry,
+        "apply_patch",
+        {
+            "files": [
+                {
+                    "path": "tracked.txt",
+                    "hunks": [
+                        {"old_lines": ["before"], "new_lines": ["after"]}
+                    ],
+                }
+            ]
+        },
+    )
 
     observation = _dispatch(registry, "git_diff", {})
 
+    assert patch.success is True
     assert observation.success is True
     assert observation.content["status"]["return_code"] == 0
     assert observation.content["diff"]["return_code"] == 0

@@ -8,7 +8,7 @@ from json import JSONDecodeError
 from typing import Any
 
 from forge.llm import FunctionCall, FunctionTool
-from forge.tools.models import ToolDefinition, ToolObservation
+from forge.tools.models import ToolDefinition, ToolObservation, ToolResult
 
 
 class ToolRegistry:
@@ -60,7 +60,7 @@ class ToolRegistry:
             )
 
         try:
-            result = definition.handler(arguments)
+            handler_result = definition.handler(arguments)
         except Exception as error:
             return ToolObservation(
                 call_id=call.call_id,
@@ -69,6 +69,11 @@ class ToolRegistry:
                 content=f"{type(error).__name__}: {error}",
             )
         try:
+            result = (
+                handler_result.content
+                if isinstance(handler_result, ToolResult)
+                else handler_result
+            )
             json.dumps(result, ensure_ascii=False)
         except (TypeError, ValueError) as error:
             return ToolObservation(
@@ -81,6 +86,10 @@ class ToolRegistry:
         return ToolObservation(
             call_id=call.call_id,
             tool_name=call.name,
-            success=True,
+            success=(
+                handler_result.success
+                if isinstance(handler_result, ToolResult)
+                else True
+            ),
             content=result,
         )

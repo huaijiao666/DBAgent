@@ -76,12 +76,22 @@ def test_agent_completes_read_test_edit_test_loop(tmp_path: Path) -> None:
         "cwd": ".",
         "timeout_seconds": 30,
     }
-    fixed_source = (
-        "def add(left: int, right: int) -> int:\n"
-        "    \"\"\"Return the sum of two integers.\"\"\"\n\n"
-        "    # The original implementation subtracted the operands.\n"
-        "    return left + right\n"
-    )
+    source_patch = {
+        "files": [
+            {
+                "path": "calculator.py",
+                "hunks": [
+                    {
+                        "old_lines": ["    return left - right"],
+                        "new_lines": [
+                            "    # Addition must combine both operands.",
+                            "    return left + right",
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
     model = ScriptedModelClient(
         [
             _tool_response(
@@ -97,10 +107,10 @@ def test_agent_completes_read_test_edit_test_loop(tmp_path: Path) -> None:
                 test_command,
             ),
             _tool_response(
-                "resp_write",
-                "call_write",
-                "write_file",
-                {"path": "calculator.py", "content": fixed_source},
+                "resp_patch",
+                "call_patch",
+                "apply_patch",
+                source_patch,
             ),
             _tool_response(
                 "resp_test_after",
@@ -123,6 +133,7 @@ def test_agent_completes_read_test_edit_test_loop(tmp_path: Path) -> None:
     assert "return left - right" in state.observations[0].content
     assert state.observations[1].content["return_code"] == 1
     assert state.observations[2].success is True
+    assert state.observations[2].content["hunks_applied"] == 1
     assert state.observations[3].content["return_code"] == 0, state.observations[
         3
     ].content
