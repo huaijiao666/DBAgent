@@ -120,6 +120,7 @@ class OpenAIResponsesClient:
             },
             "text": {"format": {"type": "text"}},
             "tools": tools,
+            "include": ["reasoning.encrypted_content"],
             "store": False,
             "background": False,
         }

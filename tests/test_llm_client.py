@@ -62,6 +62,7 @@ def test_text_request_is_stateless_and_has_no_server_tools() -> None:
     assert parameters["model"] == "gpt-5.6-sol"
     assert parameters["reasoning"] == {"effort": "high", "context": "current_turn"}
     assert parameters["tools"] == []
+    assert parameters["include"] == ["reasoning.encrypted_content"]
     assert parameters["store"] is False
     assert parameters["background"] is False
     assert "previous_response_id" not in parameters
