@@ -7,7 +7,12 @@ import sys
 from collections.abc import Sequence
 
 from forge.config import ForgeConfig
-from forge.llm import ModelCommunicationError, ModelRequest, OpenAIResponsesClient
+from forge.llm import (
+    ModelCommunicationError,
+    ModelRequest,
+    OpenAIChatCompletionsClient,
+    OpenAIResponsesClient,
+)
 
 _DEFAULT_PROMPT = "Reply with exactly: Forge smoke test successful."
 
@@ -21,7 +26,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         config = ForgeConfig.from_env()
-        client = OpenAIResponsesClient(config)
+        client = (
+            OpenAIChatCompletionsClient(config)
+            if config.api_mode == "chat_completions"
+            else OpenAIResponsesClient(config)
+        )
         response = client.create_response(ModelRequest(input=arguments.prompt))
     except ModelCommunicationError as error:
         print(f"Smoke test failed: {error}", file=sys.stderr)

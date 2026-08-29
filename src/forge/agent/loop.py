@@ -191,6 +191,12 @@ class AgentLoop:
                     observation.success and call.name in _READ_PROGRESS_TOOLS
                 )
                 if event.record is not None:
+                    _record_verification_event(
+                        self._trace,
+                        state.step,
+                        event.record,
+                        verification.status,
+                    )
                     if event.record.passed:
                         turn_progress = True
                     else:
@@ -200,12 +206,6 @@ class AgentLoop:
                             _verification_failure_hint(event.record),
                             trace=self._trace,
                             step=state.step,
-                        )
-                        _record_verification_event(
-                            self._trace,
-                            state.step,
-                            event.record,
-                            verification.status,
                         )
                         if event.repeated_failure_count >= 2:
                             _append_hint(

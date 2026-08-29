@@ -10,7 +10,11 @@ from pathlib import Path
 from forge.agent import AgentLoop, AgentStatus, TaskPlan
 from forge.agent.verification import VerificationStatus
 from forge.config import ConfigurationError, ForgeConfig
-from forge.llm import ModelCommunicationError, OpenAIResponsesClient
+from forge.llm import (
+    ModelCommunicationError,
+    OpenAIChatCompletionsClient,
+    OpenAIResponsesClient,
+)
 from forge.trace import TraceRecorder
 from forge.tools import create_coding_registry
 from forge.workspace import Workspace
@@ -47,7 +51,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         workspace_root = Workspace(arguments.workspace).root
         trace_path = _resolve_trace_path(workspace_root, arguments.trace_file)
         trace = TraceRecorder(trace_path, workspace=workspace_root, console=True)
-        model_client = OpenAIResponsesClient(config)
+        model_client = _create_model_client(config)
         registry = create_coding_registry(arguments.workspace)
         state = AgentLoop(
             model_client,
@@ -89,6 +93,12 @@ def _print_plan_history(plan_history: Sequence[TaskPlan]) -> None:
                 f"    [{step.status.value}] {step.step_id}: {step.description}",
                 file=sys.stderr,
             )
+
+
+def _create_model_client(config: ForgeConfig):
+    if config.api_mode == "chat_completions":
+        return OpenAIChatCompletionsClient(config)
+    return OpenAIResponsesClient(config)
 
 
 def _positive_integer(value: str) -> int:

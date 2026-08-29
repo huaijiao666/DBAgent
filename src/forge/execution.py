@@ -123,11 +123,19 @@ class CommandExecutor:
                 f"{MAX_COMMAND_TIMEOUT_SECONDS:g}"
             )
 
+        environment = _sanitized_environment()
+        # Git normally walks from cwd through every parent directory looking
+        # for .git. A workspace can itself be nested in another checkout, so
+        # stop discovery at the workspace's parent to keep git observations
+        # scoped to this workspace. A repository rooted at workspace is still
+        # discovered before Git reaches the ceiling.
+        environment["GIT_CEILING_DIRECTORIES"] = str(self._workspace.root.parent)
+
         try:
             completed = subprocess.run(
                 arguments,
                 cwd=working_directory,
-                env=_sanitized_environment(),
+                env=environment,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",

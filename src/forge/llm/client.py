@@ -64,11 +64,17 @@ class OpenAIResponsesClient:
 
         self._model = config.model
         self._reasoning_effort = config.reasoning_effort
-        self._client: _SDKClient = sdk_client or OpenAI(
-            api_key=config.openai_api_key,
-            timeout=timeout_seconds,
-            max_retries=max_retries,
-        )
+        if sdk_client is not None:
+            self._client = sdk_client
+        else:
+            client_parameters: dict[str, Any] = {
+                "api_key": config.openai_api_key,
+                "timeout": timeout_seconds,
+                "max_retries": max_retries,
+            }
+            if config.base_url is not None:
+                client_parameters["base_url"] = config.base_url
+            self._client = OpenAI(**client_parameters)
 
     def create_response(self, request: ModelRequest) -> ModelResponse:
         """Create one response and normalize provider-specific output."""

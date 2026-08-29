@@ -35,6 +35,19 @@ class FunctionTool:
             "strict": self.strict,
         }
 
+    def to_chat_api_dict(self) -> dict[str, Any]:
+        """Return the Chat Completions representation of this function."""
+
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": dict(self.parameters),
+                "strict": self.strict,
+            },
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class ModelRequest:

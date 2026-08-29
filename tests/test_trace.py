@@ -147,3 +147,63 @@ def test_loop_trace_contains_plan_and_recovery_events(tmp_path: Path) -> None:
     ]
     assert "plan_updated" in events
     assert "recovery" in events
+
+
+def test_loop_trace_keeps_successful_verification_command_details(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "test_pass.py").write_text(
+        "def test_passes():\n    assert True\n",
+        encoding="utf-8",
+    )
+    final = ModelResponse(
+        response_id="final",
+        model="gpt-5.6-sol",
+        status="completed",
+        output_text="Verified.",
+        output_items=({"type": "message"},),
+        function_calls=(),
+        usage=None,
+    )
+    model = _ScriptedModel(
+        [
+            _call_response(
+                "test",
+                "test_call",
+                "run_command",
+                {
+                    "command": ["python", "-m", "pytest", "-q"],
+                    "cwd": ".",
+                    "timeout_seconds": 10,
+                },
+            ),
+            final,
+        ]
+    )
+    path = tmp_path / "trace.jsonl"
+    trace = TraceRecorder(path)
+    try:
+        state = AgentLoop(
+            model,
+            create_coding_registry(tmp_path),
+            max_steps=3,
+            trace=trace,
+        ).run("Run the test and report the result.", workspace=tmp_path)
+    finally:
+        trace.close()
+
+    assert state.status is AgentStatus.COMPLETED
+    verification_events = [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if json.loads(line)["event"] == "verification"
+    ]
+    successful = [
+        event
+        for event in verification_events
+        if event["payload"].get("kind") == "test"
+    ]
+    assert successful
+    assert successful[-1]["payload"]["status"] == "passed"
+    assert successful[-1]["payload"]["return_code"] == 0
+    assert successful[-1]["payload"]["command"][-2:] == ["pytest", "-q"]

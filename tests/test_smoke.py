@@ -33,3 +33,21 @@ def test_smoke_entry_fails_cleanly_without_api_key(monkeypatch, capsys) -> None:
 
     assert exit_code == 1
     assert "OPENAI_API_KEY" in capsys.readouterr().err
+
+
+def test_smoke_uses_chat_completions_mode(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "from-environment")
+    monkeypatch.setenv("FORGE_API_MODE", "chat_completions")
+    model_client = Mock()
+    model_client.create_response.return_value = SimpleNamespace(
+        model="gpt-5.6-luna",
+        response_id="chat_smoke",
+        status="completed",
+        output_text="hello",
+    )
+
+    with patch("forge.smoke.OpenAIChatCompletionsClient", return_value=model_client):
+        exit_code = main(["Say hello"])
+
+    assert exit_code == 0
+    assert "hello" in capsys.readouterr().out

@@ -1,5 +1,9 @@
 """Public model-communication interfaces."""
 
+from forge.llm.chat_client import (
+    OpenAIChatCompletionsClient,
+    responses_items_to_chat_messages,
+)
 from forge.llm.client import OpenAIResponsesClient
 from forge.llm.errors import (
     ModelAPIError,
@@ -30,6 +34,8 @@ __all__ = [
     "ModelRequest",
     "ModelResponse",
     "ModelTimeoutError",
+    "OpenAIChatCompletionsClient",
     "OpenAIResponsesClient",
+    "responses_items_to_chat_messages",
     "TokenUsage",
 ]

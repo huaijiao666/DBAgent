@@ -169,3 +169,23 @@ def test_absolute_argument_outside_workspace_is_rejected(tmp_path: Path) -> None
             cwd=".",
             timeout_seconds=1,
         )
+
+
+def test_git_does_not_discover_a_parent_checkout_outside_workspace(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "outside.txt").write_text("outside\n", encoding="utf-8")
+    subprocess.run(["git", "add", "outside.txt"], cwd=tmp_path, check=True)
+    workspace = tmp_path / "nested-workspace"
+    workspace.mkdir()
+
+    result = CommandExecutor(Workspace(workspace)).run(
+        ["git", "status", "--short"],
+        cwd=".",
+        timeout_seconds=10,
+    )
+
+    assert result.return_code != 0
+    assert "not a git repository" in result.stderr.casefold()
+    assert "outside.txt" not in result.stdout

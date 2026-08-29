@@ -81,3 +81,27 @@ def test_cli_displays_plan_status_updates(monkeypatch, capsys, tmp_path) -> None
     assert "[completed] inspect" in captured.err
     assert "[in_progress] explain" in captured.err
     assert "VERIFIED" in captured.err
+
+
+def test_cli_selects_chat_completions_client(monkeypatch, capsys, tmp_path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "from-environment")
+    monkeypatch.setenv("FORGE_API_MODE", "chat_completions")
+    completed = SimpleNamespace(
+        status=AgentStatus.COMPLETED,
+        final_answer="Luna answer",
+        max_steps=12,
+    )
+
+    with (
+        patch("forge.cli.OpenAIResponsesClient") as responses_client,
+        patch("forge.cli.OpenAIChatCompletionsClient") as chat_client,
+        patch("forge.cli.create_coding_registry"),
+        patch("forge.cli.AgentLoop") as loop_type,
+    ):
+        loop_type.return_value.run.return_value = completed
+        exit_code = main(["inspect", "--workspace", str(tmp_path)])
+
+    assert exit_code == 0
+    responses_client.assert_not_called()
+    chat_client.assert_called_once()
+    assert capsys.readouterr().out == "Luna answer\n"

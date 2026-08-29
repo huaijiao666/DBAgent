@@ -28,6 +28,15 @@ def _config(*, reasoning_effort: str = "medium") -> ForgeConfig:
     )
 
 
+def _config_with_base_url() -> ForgeConfig:
+    return ForgeConfig.from_env(
+        {
+            "OPENAI_API_KEY": "from-environment",
+            "FORGE_BASE_URL": "https://provider.example/v1",
+        }
+    )
+
+
 def _response(*, output: list[dict[str, object]]) -> SimpleNamespace:
     return SimpleNamespace(
         id="resp_test",
@@ -132,6 +141,23 @@ def test_non_function_tool_values_are_rejected() -> None:
 def test_missing_api_key_is_rejected_before_sdk_construction() -> None:
     with pytest.raises(ModelConfigurationError, match="OPENAI_API_KEY"):
         OpenAIResponsesClient(ForgeConfig.from_env({}))
+
+
+def test_custom_base_url_is_passed_to_official_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sdk = _sdk_client()
+    constructor = Mock(return_value=sdk)
+    monkeypatch.setattr("forge.llm.client.OpenAI", constructor)
+
+    OpenAIResponsesClient(_config_with_base_url(), timeout_seconds=7, max_retries=3)
+
+    constructor.assert_called_once_with(
+        api_key="from-environment",
+        timeout=7,
+        max_retries=3,
+        base_url="https://provider.example/v1",
+    )
 
 
 @pytest.mark.parametrize(
