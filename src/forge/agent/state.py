@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from forge.agent.context import ContextUsage
+from forge.agent.plan import TaskPlan
 from forge.llm import FunctionCall
 from forge.tools import ToolObservation
 
@@ -32,6 +33,8 @@ class AgentState:
     tool_calls: list[FunctionCall] = field(default_factory=list)
     observations: list[ToolObservation] = field(default_factory=list)
     context_usage: list[ContextUsage] = field(default_factory=list)
+    plan: TaskPlan | None = None
+    plan_history: list[TaskPlan] = field(default_factory=list)
     final_answer: str | None = None
 
     @classmethod

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Protocol
 
 from forge.agent.context import ContextBudget, ContextManager
+from forge.agent.plan import PlanStore, update_plan_tool
 from forge.agent.state import AgentState, AgentStatus
 from forge.llm import ModelRequest, ModelResponse
 from forge.tools import ToolRegistry
@@ -17,8 +18,11 @@ directories are relative to the workspace root. For Python repositories, prefer
 get_repo_map, search_symbol, and read_symbol before broad file reads. Prefer
 apply_patch for changes to existing files, use create_file for new files, and
 inspect git_diff after editing. Use write_file only when a patch cannot safely
-express a small whole-file change. Never claim a command passed unless its returned
-status proves it. When the task is verified, answer without calling another tool.
+express a small whole-file change. Before ordinary inspection, create a complete
+plan with update_plan: keep its goal and success criteria stable, and update step
+statuses only when a meaningful milestone changes. Never claim a command passed
+unless its returned status proves it. When the task is verified, answer without
+calling another tool.
 """
 
 
@@ -53,7 +57,10 @@ class AgentLoop:
             max_steps=self._max_steps,
         )
         context_manager = ContextManager(task, budget=self._context_budget)
-        tool_schemas = self._tool_registry.schemas()
+        plan_store = PlanStore()
+        run_registry = self._tool_registry.clone()
+        run_registry.register(update_plan_tool(plan_store))
+        tool_schemas = run_registry.schemas()
 
         while state.step < state.max_steps:
             state.step += 1
@@ -78,10 +85,14 @@ class AgentLoop:
             executed_calls = []
             for call in response.function_calls:
                 state.tool_calls.append(call)
-                observation = self._tool_registry.dispatch(call)
+                observation = run_registry.dispatch(call)
                 state.observations.append(observation)
                 executed_calls.append((call, observation))
             context_manager.record_turn(response, executed_calls)
+            if plan_store.plan is not None:
+                state.plan = plan_store.plan
+                state.plan_history = list(plan_store.history)
+                context_manager.set_plan(plan_store.plan.to_prompt())
 
         state.status = AgentStatus.MAX_STEPS
         return state

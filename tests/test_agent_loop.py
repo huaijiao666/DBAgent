@@ -228,3 +228,62 @@ def test_agent_loop_sends_bounded_context_and_records_usage(tmp_path: Path) -> N
         usage.input_characters <= budget.max_context_characters
         for usage in state.context_usage
     )
+
+
+def test_model_updates_one_persisted_plan_across_tool_turns(tmp_path: Path) -> None:
+    initial_plan = {
+        "goal": "Inspect the repository",
+        "success_criteria": ["Explain the architecture"],
+        "steps": [
+            {
+                "id": "inspect",
+                "description": "Inspect relevant files",
+                "status": "pending",
+            },
+            {
+                "id": "explain",
+                "description": "Write the architecture explanation",
+                "status": "pending",
+            },
+        ],
+    }
+    updated_plan = {
+        **initial_plan,
+        "steps": [
+            {**initial_plan["steps"][0], "status": "completed"},
+            {**initial_plan["steps"][1], "status": "in_progress"},
+        ],
+    }
+    plan_call = FunctionCall(
+        call_id="plan_1",
+        name="update_plan",
+        arguments_json=json.dumps(initial_plan),
+    )
+    update_call = FunctionCall(
+        call_id="plan_2",
+        name="update_plan",
+        arguments_json=json.dumps(updated_plan),
+    )
+    model = QueueModelClient(
+        [
+            _response("resp_plan", calls=(plan_call,)),
+            _response("resp_inspect", calls=(_call("call_inspect"),)),
+            _response("resp_update", calls=(update_call,)),
+            _response("resp_final", text="Architecture explained"),
+        ]
+    )
+
+    state = AgentLoop(model, _registry()).run(
+        "Inspect the repository", workspace=tmp_path
+    )
+
+    assert state.status is AgentStatus.COMPLETED
+    assert state.plan is not None
+    assert state.plan.steps[0].status.value == "completed"
+    assert state.plan.steps[1].status.value == "in_progress"
+    assert len(state.plan_history) == 2
+    plan_context = str(model.requests[2].input[1]["content"])
+    assert "[Current plan]" in plan_context
+    assert "[pending] inspect" in plan_context
+    updated_context = str(model.requests[3].input[1]["content"])
+    assert "[completed] inspect" in updated_context

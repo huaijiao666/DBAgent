@@ -30,6 +30,11 @@ class ToolRegistry:
 
         return tuple(definition.schema for definition in self._definitions.values())
 
+    def clone(self) -> ToolRegistry:
+        """Copy registrations so a run can add run-local tools safely."""
+
+        return ToolRegistry(self._definitions.values())
+
     def dispatch(self, call: FunctionCall) -> ToolObservation:
         """Execute one function call and convert every ordinary failure to output."""
 

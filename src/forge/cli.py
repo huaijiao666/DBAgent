@@ -7,7 +7,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from forge.agent import AgentLoop, AgentStatus
+from forge.agent import AgentLoop, AgentStatus, TaskPlan
 from forge.config import ConfigurationError, ForgeConfig
 from forge.llm import ModelCommunicationError, OpenAIResponsesClient
 from forge.tools import create_coding_registry
@@ -45,6 +45,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Forge failed: {error}", file=sys.stderr)
         return 1
 
+    _print_plan_history(getattr(state, "plan_history", ()))
     if state.status is AgentStatus.MAX_STEPS:
         print(
             f"Forge stopped after reaching max_steps={state.max_steps}.",
@@ -54,6 +55,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print(state.final_answer or "")
     return 0
+
+
+def _print_plan_history(plan_history: Sequence[TaskPlan]) -> None:
+    """Display every accepted plan snapshot so status changes are observable."""
+
+    if not plan_history:
+        return
+    print("Plan status updates:", file=sys.stderr)
+    for number, plan in enumerate(plan_history, start=1):
+        print(f"  update {number}: {plan.goal}", file=sys.stderr)
+        for step in plan.steps:
+            print(
+                f"    [{step.status.value}] {step.step_id}: {step.description}",
+                file=sys.stderr,
+            )
 
 
 def _positive_integer(value: str) -> int:

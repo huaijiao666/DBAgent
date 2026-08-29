@@ -7,6 +7,13 @@ from forge.agent.context import (
     ContextUsage,
 )
 from forge.agent.loop import AgentLoop
+from forge.agent.plan import (
+    PlanStep,
+    PlanStepStatus,
+    PlanStore,
+    TaskPlan,
+    update_plan_tool,
+)
 from forge.agent.state import AgentState, AgentStatus
 
 __all__ = [
@@ -17,4 +24,9 @@ __all__ = [
     "ContextManager",
     "ContextSnapshot",
     "ContextUsage",
+    "PlanStep",
+    "PlanStepStatus",
+    "PlanStore",
+    "TaskPlan",
+    "update_plan_tool",
 ]
