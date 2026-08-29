@@ -1,4 +1,4 @@
-"""Command-line entry point for the minimal read-only Forge agent."""
+"""Command-line entry point for the Forge coding agent."""
 
 from __future__ import annotations
 
@@ -17,12 +17,13 @@ from forge.llm import (
 )
 from forge.trace import TraceRecorder
 from forge.tools import create_coding_registry
+from forge.ui import TerminalUI
 from forge.workspace import Workspace
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Run the minimal Forge coding agent."
+        description="Run the Forge local coding agent."
     )
     parser.add_argument("task", help="Programming task for the agent.")
     parser.add_argument(
@@ -46,11 +47,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
 
     trace = None
+    ui = None
     try:
         config = ForgeConfig.from_env()
         workspace_root = Workspace(arguments.workspace).root
         trace_path = _resolve_trace_path(workspace_root, arguments.trace_file)
-        trace = TraceRecorder(trace_path, workspace=workspace_root, console=True)
+        ui = TerminalUI()
+        ui.start(
+            task=arguments.task,
+            workspace=workspace_root,
+            model=config.model,
+            max_steps=arguments.max_steps,
+        )
+        trace = TraceRecorder(
+            trace_path,
+            workspace=workspace_root,
+            console=True,
+            renderer=ui,
+        )
         model_client = _create_model_client(config)
         registry = create_coding_registry(arguments.workspace)
         state = AgentLoop(
@@ -60,13 +74,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             trace=trace,
         ).run(arguments.task, workspace=arguments.workspace)
     except (ConfigurationError, ModelCommunicationError, OSError, ValueError) as error:
+        if ui is not None:
+            ui.error(str(error))
         print(f"Forge failed: {error}", file=sys.stderr)
         return 1
     finally:
         if trace is not None:
             trace.close()
 
-    _print_plan_history(getattr(state, "plan_history", ()))
+    if ui is not None:
+        ui.render_plan_history(getattr(state, "plan_history", ()))
+        ui.finish(state)
+    else:
+        _print_plan_history(getattr(state, "plan_history", ()))
     if state.status is AgentStatus.MAX_STEPS:
         print(
             f"INCOMPLETE: Forge stopped after reaching max_steps={state.max_steps}.",

@@ -9,7 +9,13 @@ import time
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, Protocol, TextIO
+
+
+class ConsoleRenderer(Protocol):
+    """Render one already-sanitized trace event for a human terminal."""
+
+    def render_event(self, item: Mapping[str, Any]) -> str: ...
 
 _SENSITIVE_KEY = re.compile(
     r"(?:api[_-]?key|access[_-]?token|auth(?:orization)?|password|passwd|secret)",
@@ -34,11 +40,13 @@ class TraceRecorder:
         workspace: Path | None = None,
         console: bool = False,
         stream: TextIO | None = None,
+        renderer: ConsoleRenderer | None = None,
     ) -> None:
         self.path = path
         self.workspace = workspace.resolve() if workspace is not None else None
         self.console = console
         self._stream = stream or sys.stderr
+        self._renderer = renderer
         self._started = time.monotonic()
         self._file = self._open(path)
 
@@ -63,7 +71,12 @@ class TraceRecorder:
         self._file.write("\n")
         self._file.flush()
         if self.console:
-            print(_format_console_line(item), file=self._stream, flush=True)
+            line = (
+                self._renderer.render_event(item)
+                if self._renderer is not None
+                else _format_console_line(item)
+            )
+            print(line, file=self._stream, flush=True)
 
     def close(self) -> None:
         if not self._file.closed:

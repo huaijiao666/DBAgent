@@ -16,6 +16,8 @@ dependencies = [
 [project.scripts]
 forge = "forge.cli:main"
 forge-smoke = "forge.smoke:main"
+DBA = "forge.repl:main"
+dba = "forge.repl:main"
 
 [project.optional-dependencies]
 dev = [

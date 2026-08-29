@@ -14,6 +14,7 @@ from forge.agent.plan import (
     TaskPlan,
     update_plan_tool,
 )
+from forge.agent.session import SessionContext, SessionObservation
 from forge.agent.state import AgentState, AgentStatus
 from forge.agent.verification import (
     VerificationRecord,
@@ -34,6 +35,8 @@ __all__ = [
     "PlanStore",
     "TaskPlan",
     "update_plan_tool",
+    "SessionContext",
+    "SessionObservation",
     "VerificationRecord",
     "VerificationStatus",
     "VerificationTracker",

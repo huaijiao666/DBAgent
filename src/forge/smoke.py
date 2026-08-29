@@ -19,7 +19,7 @@ _DEFAULT_PROMPT = "Reply with exactly: Forge smoke test successful."
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Send one stateless text request through the OpenAI Responses API."
+        description="Send one stateless text request through the configured model API."
     )
     parser.add_argument("prompt", nargs="?", default=_DEFAULT_PROMPT)
     arguments = parser.parse_args(argv)
