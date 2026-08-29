@@ -9,6 +9,7 @@ from typing import Any
 
 from forge.llm import FunctionTool
 from forge.tools.models import ToolDefinition, object_schema
+from forge.tools.repository import register_repository_tools
 from forge.tools.registry import ToolRegistry
 from forge.workspace import Workspace
 
@@ -22,10 +23,10 @@ _MAX_SEARCH_MATCHES = 200
 
 
 def create_readonly_registry(workspace_root: Path) -> ToolRegistry:
-    """Create the three read-only tools for one workspace."""
+    """Create generic and Python-aware read-only tools for one workspace."""
 
     workspace = Workspace(workspace_root)
-    return ToolRegistry(
+    registry = ToolRegistry(
         [
             ToolDefinition(
                 schema=FunctionTool(
@@ -90,6 +91,8 @@ def create_readonly_registry(workspace_root: Path) -> ToolRegistry:
             ),
         ]
     )
+    register_repository_tools(registry, workspace)
+    return registry
 
 
 def _required_string(arguments: Mapping[str, Any], name: str) -> str:
