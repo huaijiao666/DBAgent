@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from forge.agent import AgentLoop, AgentStatus
+from forge.agent import AgentLoop, AgentStatus, ContextBudget
 from forge.llm import FunctionCall, FunctionTool, ModelResponse
 from forge.tools import ToolDefinition, ToolRegistry
 
@@ -90,7 +90,12 @@ def test_normal_termination_without_tool_call(tmp_path: Path) -> None:
     assert state.step == 1
     assert state.final_answer == "Final answer"
     assert state.tool_calls == []
-    assert state.context[0] == {"role": "user", "content": "inspect"}
+    assert state.context[0] == {
+        "role": "user",
+        "content": "[Persistent task context]\ninspect",
+    }
+    assert len(state.context_usage) == 1
+    assert state.context_usage[0].input_characters <= 48_000
 
 
 def test_multiple_consecutive_tool_calls_are_fed_back_to_model(
@@ -181,3 +186,45 @@ def test_max_steps_is_a_hard_termination_condition(tmp_path: Path) -> None:
     assert state.step == 2
     assert state.final_answer is None
     assert len(model.requests) == 2
+
+
+def test_agent_loop_sends_bounded_context_and_records_usage(tmp_path: Path) -> None:
+    model = QueueModelClient(
+        [
+            _response("resp_1", calls=(_call("call_large"),)),
+            _response("resp_2", text="Finished"),
+        ]
+    )
+    budget = ContextBudget(
+        max_context_characters=10_000,
+        max_task_characters=1_000,
+        max_plan_characters=500,
+        max_repository_map_characters=1_000,
+        max_relevant_code_characters=1_500,
+        max_compact_observations_characters=1_000,
+        max_recent_observations_characters=3_000,
+        max_single_observation_characters=1_000,
+        max_call_arguments_characters=500,
+        recent_observation_count=2,
+    )
+
+    state = AgentLoop(
+        model,
+        _registry(lambda _arguments: "z" * 50_000),
+        context_budget=budget,
+    ).run("inspect", workspace=tmp_path)
+
+    second_input = model.requests[1].input
+    serialized = json.dumps(
+        second_input,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    assert len(serialized) <= budget.max_context_characters
+    assert "z" * 10_000 not in serialized
+    assert "context truncated" in serialized
+    assert len(state.context_usage) == 2
+    assert all(
+        usage.input_characters <= budget.max_context_characters
+        for usage in state.context_usage
+    )

@@ -7,6 +7,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from forge.agent.context import ContextUsage
 from forge.llm import FunctionCall
 from forge.tools import ToolObservation
 
@@ -30,6 +31,7 @@ class AgentState:
     response_ids: list[str] = field(default_factory=list)
     tool_calls: list[FunctionCall] = field(default_factory=list)
     observations: list[ToolObservation] = field(default_factory=list)
+    context_usage: list[ContextUsage] = field(default_factory=list)
     final_answer: str | None = None
 
     @classmethod

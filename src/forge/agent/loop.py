@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
+from forge.agent.context import ContextBudget, ContextManager
 from forge.agent.state import AgentState, AgentStatus
 from forge.llm import ModelRequest, ModelResponse
 from forge.tools import ToolRegistry
@@ -35,6 +36,7 @@ class AgentLoop:
         *,
         max_steps: int = 12,
         instructions: str = DEFAULT_AGENT_INSTRUCTIONS,
+        context_budget: ContextBudget | None = None,
     ) -> None:
         if max_steps <= 0:
             raise ValueError("max_steps must be positive")
@@ -42,6 +44,7 @@ class AgentLoop:
         self._tool_registry = tool_registry
         self._max_steps = max_steps
         self._instructions = instructions
+        self._context_budget = context_budget
 
     def run(self, task: str, *, workspace: Path) -> AgentState:
         state = AgentState.start(
@@ -49,31 +52,36 @@ class AgentLoop:
             workspace=workspace,
             max_steps=self._max_steps,
         )
+        context_manager = ContextManager(task, budget=self._context_budget)
         tool_schemas = self._tool_registry.schemas()
 
         while state.step < state.max_steps:
             state.step += 1
+            snapshot = context_manager.build_context(step=state.step)
+            state.context = list(snapshot.input_items)
+            state.context_usage.append(snapshot.usage)
             response = self._model_client.create_response(
                 ModelRequest(
-                    input=tuple(state.context),
+                    input=snapshot.input_items,
                     instructions=self._instructions,
                     tools=tool_schemas,
                     parallel_tool_calls=True,
                 )
             )
             state.response_ids.append(response.response_id)
-            state.context.extend(response.output_items)
 
             if not response.function_calls:
                 state.final_answer = response.output_text
                 state.status = AgentStatus.COMPLETED
                 return state
 
+            executed_calls = []
             for call in response.function_calls:
                 state.tool_calls.append(call)
                 observation = self._tool_registry.dispatch(call)
                 state.observations.append(observation)
-                state.context.append(observation.to_model_input())
+                executed_calls.append((call, observation))
+            context_manager.record_turn(response, executed_calls)
 
         state.status = AgentStatus.MAX_STEPS
         return state
