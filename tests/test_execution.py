@@ -47,6 +47,20 @@ def test_command_uses_the_active_python_environment(tmp_path: Path) -> None:
     assert Path(result.stdout.strip()).parent == Path(sys.executable).parent
 
 
+def test_python3_alias_uses_the_active_python_environment(tmp_path: Path) -> None:
+    """Models often emit Unix's python3 name even when the agent runs on Windows."""
+    executor = CommandExecutor(Workspace(tmp_path))
+
+    result = executor.run(
+        ["python3", "-c", "import sys; print(sys.executable)"],
+        cwd=".",
+        timeout_seconds=10,
+    )
+
+    assert result.return_code == 0
+    assert Path(result.stdout.strip()).parent == Path(sys.executable).parent
+
+
 def test_command_cwd_cannot_escape_workspace(tmp_path: Path) -> None:
     workspace = tmp_path / "repo"
     workspace.mkdir()

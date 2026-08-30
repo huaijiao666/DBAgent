@@ -171,3 +171,25 @@ def test_session_context_preserves_passed_evidence_until_a_mutation() -> None:
         )
     )
     assert context.verification_status == "stale"
+
+
+def test_session_context_round_trips_through_validated_json_shape() -> None:
+    context = SessionContext()
+    context.plan = TaskPlan(
+        goal="Finish snake game",
+        success_criteria=("pytest passes",),
+        steps=(PlanStep("verify", "Run tests", PlanStepStatus.IN_PROGRESS),),
+    )
+    context.verification_status = "stale"
+    context.verification_summary = "code changed after the last test"
+    context.recovery_hints = ["run pytest"]
+    context.observations = [
+        SessionObservation(2, "apply_patch", True, "game.py changed", True)
+    ]
+    context.turns = 2
+
+    restored = SessionContext.from_dict(context.to_dict())
+
+    assert restored.to_dict() == context.to_dict()
+    assert restored.plan is not None
+    assert restored.plan.goal == "Finish snake game"

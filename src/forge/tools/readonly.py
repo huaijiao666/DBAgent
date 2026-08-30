@@ -14,7 +14,17 @@ from forge.tools.registry import ToolRegistry
 from forge.workspace import Workspace
 
 _EXCLUDED_DIRECTORIES = frozenset(
-    {".git", ".venv", "venv", "__pycache__", ".pytest_cache", "node_modules"}
+    {
+        ".forge",
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        "venv",
+        "__pycache__",
+        "node_modules",
+    }
 )
 _MAX_LIST_ENTRIES = 2_000
 _MAX_READ_CHARACTERS = 100_000
@@ -104,6 +114,7 @@ def _required_string(arguments: Mapping[str, Any], name: str) -> str:
 
 def _list_files(workspace: Workspace, arguments: Mapping[str, Any]) -> str:
     path = workspace.resolve(_required_string(arguments, "path"))
+    _reject_excluded_path(workspace, path)
     if path.is_file():
         return workspace.relative_name(path)
     if not path.is_dir():
@@ -120,6 +131,7 @@ def _list_files(workspace: Workspace, arguments: Mapping[str, Any]) -> str:
 
 def _read_file(workspace: Workspace, arguments: Mapping[str, Any]) -> str:
     path = workspace.resolve(_required_string(arguments, "path"))
+    _reject_excluded_path(workspace, path)
     if not path.is_file():
         raise ValueError("path is not a file")
     text = path.read_text(encoding="utf-8")
@@ -140,6 +152,7 @@ def _read_file(workspace: Workspace, arguments: Mapping[str, Any]) -> str:
 def _search_text(workspace: Workspace, arguments: Mapping[str, Any]) -> str:
     query = _required_string(arguments, "query")
     path = workspace.resolve(_required_string(arguments, "path"))
+    _reject_excluded_path(workspace, path)
     files = [path] if path.is_file() else _iter_files(workspace, path)
     folded_query = query.casefold()
     matches: list[str] = []
@@ -172,7 +185,7 @@ def _iter_files(workspace: Workspace, root: Path) -> Iterator[Path]:
         directory_names[:] = sorted(
             name
             for name in directory_names
-            if name not in _EXCLUDED_DIRECTORIES
+            if name.casefold() not in _EXCLUDED_DIRECTORIES
             and not (current / name).is_symlink()
         )
         for file_name in sorted(file_names):
@@ -192,3 +205,9 @@ def _is_local_environment_name(name: str) -> bool:
     return lowered == ".env" or (
         lowered.startswith(".env.") and lowered != ".env.example"
     )
+
+
+def _reject_excluded_path(workspace: Workspace, path: Path) -> None:
+    relative = path.relative_to(workspace.root)
+    if any(part.casefold() in _EXCLUDED_DIRECTORIES for part in relative.parts):
+        raise PermissionError("access to repository metadata/cache directories is blocked")

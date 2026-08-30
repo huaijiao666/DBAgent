@@ -30,6 +30,22 @@ class ToolRegistry:
 
         return tuple(definition.schema for definition in self._definitions.values())
 
+    @property
+    def names(self) -> tuple[str, ...]:
+        """Return registered names in deterministic order."""
+
+        return tuple(self._definitions)
+
+    def select(self, allowed_names: Iterable[str]) -> ToolRegistry:
+        """Copy only explicitly allowed tools, preserving registration order."""
+
+        allowed = set(allowed_names)
+        return ToolRegistry(
+            definition
+            for name, definition in self._definitions.items()
+            if name in allowed
+        )
+
     def clone(self) -> ToolRegistry:
         """Copy registrations so a run can add run-local tools safely."""
 

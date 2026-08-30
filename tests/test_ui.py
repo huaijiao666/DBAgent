@@ -30,7 +30,7 @@ def test_terminal_ui_renders_header_and_summary(tmp_path: Path) -> None:
     )
 
     output = stream.getvalue()
-    assert "Forge coding agent" in output
+    assert "DBAgent coding session" in output
     assert "Fix the calculator bug" in output
     assert "Status         VERIFIED" in output
     assert "Files changed  calculator.py" in output
@@ -67,6 +67,88 @@ def test_terminal_ui_formats_trace_events_without_ansi() -> None:
     assert "\x1b[" not in request
 
 
+def test_terminal_ui_explains_tool_actions_in_human_terms() -> None:
+    ui = TerminalUI(stream=io.StringIO(), color=False)
+    ui.start(task="task", workspace=Path("."), model="model", max_steps=3)
+
+    read = ui.render_event(
+        {
+            "elapsed_ms": 100,
+            "step": 1,
+            "event": "tool_start",
+            "payload": {"tool_name": "read_file", "target": "README.md"},
+        }
+    )
+    command = ui.render_event(
+        {
+            "elapsed_ms": 200,
+            "step": 1,
+            "event": "tool_start",
+            "payload": {
+                "tool_name": "run_command",
+                "command": ["python.exe", "-m", "pytest", "-q"],
+            },
+        }
+    )
+    search = ui.render_event(
+        {
+            "elapsed_ms": 300,
+            "step": 1,
+            "event": "tool_start",
+            "payload": {
+                "tool_name": "search_text",
+                "path": ".",
+                "query": "priority",
+                "target": ".",
+            },
+        }
+    )
+
+    assert "读取文件  README.md" in read
+    assert "运行命令  python.exe -m pytest -q" in command
+    assert "搜索文本  priority  in ." in search
+
+
+def test_terminal_ui_shows_patch_failure_reason() -> None:
+    ui = TerminalUI(stream=io.StringIO(), color=False)
+    ui.start(task="task", workspace=Path("."), model="model", max_steps=3)
+
+    rendered = ui.render_event(
+        {
+            "elapsed_ms": 400,
+            "step": 2,
+            "event": "tool_result",
+            "payload": {
+                "tool_name": "apply_patch",
+                "success": False,
+                "failure_reason": "PatchError: app.py hunk 1: context did not match",
+            },
+        }
+    )
+
+    assert "失败: 应用补丁" in rendered
+    assert "context did not match" in rendered
+
+
+def test_terminal_ui_renders_only_latest_plan_snapshot() -> None:
+    stream = io.StringIO()
+    ui = TerminalUI(stream=stream, color=False)
+    first = SimpleNamespace(
+        goal="Explain project",
+        steps=[SimpleNamespace(step_id="inspect", description="Inspect", status="in_progress")],
+    )
+    latest = SimpleNamespace(
+        goal="Explain project",
+        steps=[SimpleNamespace(step_id="inspect", description="Inspect", status="completed")],
+    )
+
+    ui.render_plan_history([first, latest])
+
+    output = stream.getvalue()
+    assert output.count("Explain project") == 1
+    assert "Inspect [completed]" in output
+
+
 def test_terminal_ui_does_not_label_max_steps_as_verified() -> None:
     stream = io.StringIO()
     ui = TerminalUI(stream=stream, color=False)
@@ -82,3 +164,60 @@ def test_terminal_ui_does_not_label_max_steps_as_verified() -> None:
     )
 
     assert "Status         INCOMPLETE" in stream.getvalue()
+
+
+def test_terminal_ui_lists_files_created_in_a_non_git_workspace() -> None:
+    stream = io.StringIO()
+    ui = TerminalUI(stream=stream, color=False)
+
+    ui.finish(
+        SimpleNamespace(
+            status=AgentStatus.COMPLETED,
+            is_verified=True,
+            verification_status=VerificationStatus.PASSED,
+            step=3,
+            max_steps=12,
+            observations=[
+                SimpleNamespace(
+                    content={
+                        "action": "created",
+                        "path": "hello.py",
+                        "changed_files": ["hello.py"],
+                    }
+                )
+            ],
+        )
+    )
+
+    assert "Files changed  hello.py" in stream.getvalue()
+
+
+def test_terminal_ui_lists_structured_apply_patch_files() -> None:
+    stream = io.StringIO()
+    ui = TerminalUI(stream=stream, color=False)
+
+    ui.finish(
+        SimpleNamespace(
+            status=AgentStatus.COMPLETED,
+            is_verified=True,
+            verification_status=VerificationStatus.PASSED,
+            step=4,
+            max_steps=12,
+            observations=[
+                SimpleNamespace(
+                    content={
+                        "applied": True,
+                        "changed_files": [
+                            {
+                                "path": "calculator.py",
+                                "before_sha256": "before",
+                                "after_sha256": "after",
+                            }
+                        ],
+                    }
+                )
+            ],
+        )
+    )
+
+    assert "Files changed  calculator.py" in stream.getvalue()

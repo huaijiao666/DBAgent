@@ -103,6 +103,96 @@ class SessionContext:
         self.observations.clear()
         self.turns = 0
 
+    def to_dict(self) -> dict[str, Any]:
+        """Return the bounded session state in a version-independent shape."""
+
+        return {
+            "plan": self.plan.to_dict() if self.plan is not None else None,
+            "verification_status": self.verification_status,
+            "verification_summary": self.verification_summary,
+            "recovery_hints": list(self.recovery_hints),
+            "observations": [
+                {
+                    "turn": item.turn,
+                    "tool_name": item.tool_name,
+                    "success": item.success,
+                    "summary": item.summary,
+                    "important": item.important,
+                }
+                for item in self.observations
+            ],
+            "turns": self.turns,
+        }
+
+    @classmethod
+    def from_dict(
+        cls,
+        value: Mapping[str, Any],
+        *,
+        max_characters: int = 16_000,
+        max_observations: int = 12,
+    ) -> SessionContext:
+        """Validate and restore one locally persisted session snapshot."""
+
+        if not isinstance(value, Mapping):
+            raise ValueError("session context must be an object")
+        raw_plan = value.get("plan")
+        plan = None if raw_plan is None else TaskPlan.from_mapping(raw_plan)
+        verification_status = value.get("verification_status", "not_run")
+        verification_summary = value.get("verification_summary", "")
+        raw_hints = value.get("recovery_hints", [])
+        raw_observations = value.get("observations", [])
+        turns = value.get("turns", 0)
+        if not isinstance(verification_status, str):
+            raise ValueError("verification_status must be a string")
+        if not isinstance(verification_summary, str):
+            raise ValueError("verification_summary must be a string")
+        if isinstance(raw_hints, (str, bytes)) or not isinstance(raw_hints, Sequence):
+            raise ValueError("recovery_hints must be an array")
+        if any(not isinstance(item, str) for item in raw_hints):
+            raise ValueError("recovery_hints must contain strings")
+        if (
+            isinstance(raw_observations, (str, bytes))
+            or not isinstance(raw_observations, Sequence)
+        ):
+            raise ValueError("observations must be an array")
+        if isinstance(turns, bool) or not isinstance(turns, int) or turns < 0:
+            raise ValueError("turns must be a non-negative integer")
+
+        observations: list[SessionObservation] = []
+        for item in raw_observations:
+            if not isinstance(item, Mapping):
+                raise ValueError("each session observation must be an object")
+            turn = item.get("turn")
+            tool_name = item.get("tool_name")
+            success = item.get("success")
+            summary = item.get("summary")
+            important = item.get("important")
+            if isinstance(turn, bool) or not isinstance(turn, int) or turn < 0:
+                raise ValueError("observation turn must be a non-negative integer")
+            if not isinstance(tool_name, str) or not tool_name:
+                raise ValueError("observation tool_name must be a non-empty string")
+            if not isinstance(success, bool) or not isinstance(important, bool):
+                raise ValueError("observation flags must be booleans")
+            if not isinstance(summary, str):
+                raise ValueError("observation summary must be a string")
+            observations.append(
+                SessionObservation(turn, tool_name, success, summary, important)
+            )
+
+        restored = cls(
+            max_characters=max_characters,
+            max_observations=max_observations,
+            plan=plan,
+            verification_status=verification_status,
+            verification_summary=verification_summary,
+            recovery_hints=list(raw_hints),
+            observations=observations,
+            turns=turns,
+        )
+        restored._trim()
+        return restored
+
     def augment_prompt(self, prompt: str) -> str:
         """Add the compact session context before the current turn request."""
 

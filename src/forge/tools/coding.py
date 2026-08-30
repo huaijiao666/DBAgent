@@ -210,22 +210,34 @@ def _apply_patch(
     return ToolResult(success=bool(result["applied"]), content=result)
 
 
-def _create_file(workspace: Workspace, arguments: Mapping[str, Any]) -> str:
+def _create_file(workspace: Workspace, arguments: Mapping[str, Any]) -> dict[str, object]:
     path = workspace.resolve_for_create(_required_string(arguments, "path"))
     content = _content(arguments)
     with path.open("x", encoding="utf-8", newline="") as file:
         file.write(content)
-    return f"created {workspace.relative_name(path)} ({len(content)} characters)"
+    relative_path = workspace.relative_name(path)
+    return {
+        "action": "created",
+        "path": relative_path,
+        "changed_files": [relative_path],
+        "characters": len(content),
+    }
 
 
-def _write_file(workspace: Workspace, arguments: Mapping[str, Any]) -> str:
+def _write_file(workspace: Workspace, arguments: Mapping[str, Any]) -> dict[str, object]:
     path = workspace.resolve(_required_string(arguments, "path"))
     if not path.is_file():
         raise ValueError("path is not a file")
     content = _content(arguments)
     with path.open("w", encoding="utf-8", newline="") as file:
         file.write(content)
-    return f"wrote {workspace.relative_name(path)} ({len(content)} characters)"
+    relative_path = workspace.relative_name(path)
+    return {
+        "action": "wrote",
+        "path": relative_path,
+        "changed_files": [relative_path],
+        "characters": len(content),
+    }
 
 
 def _git_diff(executor: CommandExecutor) -> dict[str, object]:

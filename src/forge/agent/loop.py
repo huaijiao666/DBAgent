@@ -8,29 +8,28 @@ from pathlib import Path
 from typing import Protocol
 
 from forge.agent.context import ContextBudget, ContextManager
-from forge.agent.plan import PlanStore, update_plan_tool
+from forge.agent.mode import TaskMode, instructions_for_mode, resolve_task_mode
+from forge.agent.plan import PlanStore, TaskPlan, update_plan_tool
 from forge.agent.state import AgentState, AgentStatus
 from forge.agent.verification import VerificationStatus, VerificationTracker
-from forge.llm import ModelRequest, ModelResponse
+from forge.llm import (
+    ModelConnectionError,
+    ModelRateLimitError,
+    ModelRequest,
+    ModelResponse,
+    ModelTimeoutError,
+    ModelCommunicationError,
+)
 from forge.tools import ToolRegistry
 
-DEFAULT_AGENT_INSTRUCTIONS = """You are Forge, a local coding agent.
-Inspect the workspace, reproduce problems, make the smallest necessary edits, and
-verify changes with deterministic commands. Tool paths and command working
-directories are relative to the workspace root. For Python repositories, prefer
-get_repo_map, search_symbol, and read_symbol before broad file reads. Prefer
-apply_patch for changes to existing files, use create_file for new files, and
-inspect git_diff after editing. Use write_file only when a patch cannot safely
-express a small whole-file change. Before ordinary inspection, create a complete
-plan with update_plan: keep its goal and success criteria stable, and update step
-statuses only when a meaningful milestone changes. Never claim a command passed
-unless its returned status proves it. After every code change, run a targeted
-deterministic test or compiler check. Before the final answer, run an appropriate
-verification command after the latest change. A final answer is not evidence of
-verification; answer only after the runtime has observed a passing check.
-"""
-
 _RECOVERY_AFTER_ROUNDS = 2
+_ASK_MAX_TOOL_ROUNDS = 3
+_DEFAULT_MODEL_RETRIES = 5
+_RETRYABLE_MODEL_ERRORS = (
+    ModelConnectionError,
+    ModelTimeoutError,
+    ModelRateLimitError,
+)
 _READ_PROGRESS_TOOLS = {
     "get_repo_map",
     "search_symbol",
@@ -38,6 +37,12 @@ _READ_PROGRESS_TOOLS = {
     "list_files",
     "read_file",
     "search_text",
+}
+_EVIDENCE_PROGRESS_TOOLS = {*_READ_PROGRESS_TOOLS, "git_diff"}
+_ASK_TOOL_NAMES = {
+    *_READ_PROGRESS_TOOLS,
+    "git_diff",
+    "run_command",
 }
 
 
@@ -64,32 +69,83 @@ class AgentLoop:
         tool_registry: ToolRegistry,
         *,
         max_steps: int = 12,
-        instructions: str = DEFAULT_AGENT_INSTRUCTIONS,
+        max_model_retries: int = _DEFAULT_MODEL_RETRIES,
+        mode: TaskMode | str = TaskMode.AUTO,
+        instructions: str | None = None,
         context_budget: ContextBudget | None = None,
+        initial_plan: TaskPlan | None = None,
+        verification_required: bool = False,
         trace: TraceSink | None = None,
     ) -> None:
         if max_steps <= 0:
             raise ValueError("max_steps must be positive")
+        if max_model_retries < 0:
+            raise ValueError("max_model_retries must not be negative")
         self._model_client = model_client
         self._tool_registry = tool_registry
         self._max_steps = max_steps
+        self._max_model_retries = max_model_retries
+        self._mode = mode if isinstance(mode, TaskMode) else TaskMode(mode)
         self._instructions = instructions
         self._context_budget = context_budget
+        self._initial_plan = initial_plan
+        self._verification_required = verification_required
         self._trace = trace
 
-    def run(self, task: str, *, workspace: Path) -> AgentState:
+    def run(
+        self,
+        task: str,
+        *,
+        workspace: Path,
+        launch_directory: Path | None = None,
+    ) -> AgentState:
+        resolved_mode = resolve_task_mode(task, self._mode)
         state = AgentState.start(
             task=task,
             workspace=workspace,
+            launch_directory=launch_directory,
             max_steps=self._max_steps,
+            mode=resolved_mode,
         )
-        context_manager = ContextManager(task, budget=self._context_budget)
-        plan_store = PlanStore()
-        verification = VerificationTracker()
+        context_manager = ContextManager(
+            task,
+            execution_context=_execution_context(state),
+            budget=self._context_budget,
+        )
+        plan_store = PlanStore.resume(self._initial_plan)
+        verification = VerificationTracker(
+            mutation_generation=1 if self._verification_required else 0
+        )
         no_progress_rounds = 0
-        run_registry = self._tool_registry.clone()
-        run_registry.register(update_plan_tool(plan_store))
+        ask_tool_rounds = 0
+        seen_evidence: set[tuple[tuple[str, str], int]] = set()
+        run_registry = (
+            self._tool_registry.select(_ASK_TOOL_NAMES)
+            if resolved_mode is TaskMode.ASK
+            else self._tool_registry.clone()
+        )
+        if resolved_mode is TaskMode.CODE:
+            run_registry.register(update_plan_tool(plan_store))
+        if plan_store.plan is not None:
+            state.plan = plan_store.plan
+            state.plan_history = list(plan_store.history)
+            context_manager.set_plan(plan_store.plan.to_prompt())
+        if self._verification_required:
+            context_manager.set_verification_status(
+                "status=stale; a prior DBA turn left failed or stale deterministic "
+                "evidence, so this continuation must verify the current files"
+            )
         tool_schemas = run_registry.schemas()
+        self._record_trace(
+            "run_started",
+            0,
+            {
+                "mode": resolved_mode.value,
+                "workspace": ".",
+                "max_steps": state.max_steps,
+                "tool_count": len(tool_schemas),
+            },
+        )
 
         while state.step < state.max_steps:
             state.step += 1
@@ -105,13 +161,53 @@ class AgentLoop:
                     "context_usage": _context_usage_payload(snapshot.usage),
                 },
             )
-            response = self._model_client.create_response(
+            force_final = (
+                (
+                    state.step == state.max_steps
+                    or (
+                        resolved_mode is TaskMode.ASK
+                        and (
+                            ask_tool_rounds >= _ASK_MAX_TOOL_ROUNDS
+                            or no_progress_rounds >= 1
+                        )
+                    )
+                )
+                and not (
+                    verification.requires_verification
+                    and not verification.is_verified
+                )
+            )
+            request_instructions = self._instructions or instructions_for_mode(
+                resolved_mode
+            )
+            remaining_after_this_turn = state.max_steps - state.step
+            if (
+                resolved_mode is TaskMode.CODE
+                and not force_final
+                and remaining_after_this_turn <= 2
+            ):
+                request_instructions += (
+                    "\n\nThe hard step budget is nearly exhausted: only "
+                    f"{remaining_after_this_turn} later model turn(s) remain. "
+                    "Do not explore or reread unchanged files. Execute the most "
+                    "important missing deterministic verification or corrective "
+                    "action now, then update the existing plan accurately."
+                )
+            if force_final:
+                request_instructions += (
+                    "\n\nThis is the final model turn. Do not call tools. Give the "
+                    "user a concise, honest result now. If work remains, state "
+                    "exactly what is incomplete instead of claiming success."
+                )
+            response = self._create_model_response(
                 ModelRequest(
                     input=snapshot.input_items,
-                    instructions=self._instructions,
+                    instructions=request_instructions,
                     tools=tool_schemas,
                     parallel_tool_calls=True,
-                )
+                    tool_choice="none" if force_final else "auto",
+                ),
+                step=state.step,
             )
             state.response_ids.append(response.response_id)
             self._record_trace(
@@ -119,11 +215,46 @@ class AgentLoop:
                 state.step,
                 _model_response_payload(response),
             )
+            if response.function_calls and response.output_text.strip():
+                self._publish_live(
+                    "assistant_update",
+                    state.step,
+                    {"text": response.output_text.strip()},
+                )
 
             if not response.function_calls:
+                answer = response.output_text.strip()
+                if not answer:
+                    if state.step == state.max_steps:
+                        state.status = AgentStatus.MAX_STEPS
+                        state.final_answer = None
+                        _sync_verification_state(
+                            state, verification, no_progress_rounds
+                        )
+                        self._record_incomplete(state, verification)
+                        return state
+                    _append_hint(
+                        state,
+                        context_manager,
+                        "The model returned no text and no tool call. Provide a "
+                        "useful final answer or take one concrete next action.",
+                        trace=self._trace,
+                        step=state.step,
+                    )
+                    continue
                 if verification.requires_verification and not verification.is_verified:
+                    # Do not surface an unverified completion claim. The trace
+                    # records that text existed, while user-visible state remains
+                    # explicitly incomplete until deterministic evidence passes.
                     state.final_answer = None
                     hint = _final_verification_hint(verification)
+                    if state.step == state.max_steps:
+                        state.status = AgentStatus.MAX_STEPS
+                        _sync_verification_state(
+                            state, verification, no_progress_rounds
+                        )
+                        self._record_incomplete(state, verification)
+                        return state
                     _append_hint(
                         state,
                         context_manager,
@@ -133,7 +264,29 @@ class AgentLoop:
                     )
                     _sync_verification_state(state, verification, no_progress_rounds)
                     continue
-                state.final_answer = response.output_text
+                if (
+                    resolved_mode is TaskMode.CODE
+                    and plan_store.plan is not None
+                    and not _plan_is_complete(plan_store.plan)
+                ):
+                    state.final_answer = answer if state.step == state.max_steps else None
+                    if state.step == state.max_steps:
+                        state.status = AgentStatus.MAX_STEPS
+                        _sync_verification_state(
+                            state, verification, no_progress_rounds
+                        )
+                        self._record_incomplete(state, verification)
+                        return state
+                    _append_hint(
+                        state,
+                        context_manager,
+                        "The current plan still has unfinished steps. Complete or "
+                        "explicitly block them before the final answer.",
+                        trace=self._trace,
+                        step=state.step,
+                    )
+                    continue
+                state.final_answer = answer
                 state.status = AgentStatus.COMPLETED
                 _sync_verification_state(state, verification, no_progress_rounds)
                 self._record_trace(
@@ -146,23 +299,21 @@ class AgentLoop:
                             else "COMPLETED"
                         ),
                         "verification_status": verification.status.value,
-                        "answer_characters": len(response.output_text),
+                        "answer_characters": len(answer),
+                        "mode": resolved_mode.value,
                     },
                 )
                 return state
 
             executed_calls = []
             turn_progress = False
+            turn_repeated_evidence = False
             for call in response.function_calls:
                 state.tool_calls.append(call)
                 self._record_trace(
                     "tool_start",
                     state.step,
-                    {
-                        "call_id": call.call_id,
-                        "tool_name": call.name,
-                        "argument_keys": _argument_keys(call.arguments_json),
-                    },
+                    _tool_start_payload(call),
                 )
                 observation = run_registry.dispatch(call)
                 state.observations.append(observation)
@@ -172,6 +323,14 @@ class AgentLoop:
                     state.step,
                     _tool_result_payload(call, observation),
                 )
+                if call.name == "apply_patch" and not observation.success:
+                    _append_hint(
+                        state,
+                        context_manager,
+                        _patch_failure_hint(observation),
+                        trace=self._trace,
+                        step=state.step,
+                    )
                 event = verification.observe(call, observation)
                 turn_progress = turn_progress or event.mutation
                 if event.mutation:
@@ -187,9 +346,16 @@ class AgentLoop:
                         step=state.step,
                     )
                     _record_patch_event(self._trace, state.step, observation)
-                turn_progress = turn_progress or (
-                    observation.success and call.name in _READ_PROGRESS_TOOLS
-                )
+                if observation.success and call.name in _EVIDENCE_PROGRESS_TOOLS:
+                    signature = (
+                        _call_signature(call),
+                        verification.mutation_generation,
+                    )
+                    if signature not in seen_evidence:
+                        seen_evidence.add(signature)
+                        turn_progress = True
+                    else:
+                        turn_repeated_evidence = True
                 if event.record is not None:
                     _record_verification_event(
                         self._trace,
@@ -225,12 +391,28 @@ class AgentLoop:
                         verification.status,
                     )
                 if call.name == "update_plan" and observation.success:
+                    # A real plan transition is meaningful progress. A repeated
+                    # identical snapshot is intentionally not progress, so it
+                    # cannot mask a stalled tool loop.
+                    content = observation.content
+                    if isinstance(content, Mapping):
+                        turn_progress = turn_progress or bool(
+                            content.get("changed", False)
+                        )
+                if (
+                    call.name == "update_plan"
+                    and observation.success
+                    and isinstance(observation.content, Mapping)
+                    and observation.content.get("changed", False)
+                ):
                     _record_plan_event(
                         self._trace,
                         state.step,
                         plan_store.plan,
                     )
             context_manager.record_turn(response, executed_calls)
+            if resolved_mode is TaskMode.ASK:
+                ask_tool_rounds += 1
             if plan_store.plan is not None:
                 state.plan = plan_store.plan
                 state.plan_history = list(plan_store.history)
@@ -238,34 +420,124 @@ class AgentLoop:
             no_progress_rounds = (
                 0 if turn_progress else no_progress_rounds + 1
             )
-            if no_progress_rounds >= _RECOVERY_AFTER_ROUNDS:
+            recovery_threshold = (
+                1
+                if resolved_mode is TaskMode.CODE and turn_repeated_evidence
+                else _RECOVERY_AFTER_ROUNDS
+            )
+            if no_progress_rounds >= recovery_threshold:
+                recovery = (
+                    "The read-only investigation is repeating evidence already "
+                    "collected. Stop exploring and answer the user now unless "
+                    "one specific unresolved fact is essential."
+                    if resolved_mode is TaskMode.ASK
+                    else (
+                        f"No meaningful progress for {no_progress_rounds} tool "
+                        "round(s). Stop rereading unchanged files. Consult the "
+                        "current plan and take a different concrete action now. "
+                        "If implementation exists and verification is pending, "
+                        "run the appropriate targeted or full deterministic "
+                        "command; otherwise update the plan honestly and finish."
+                    )
+                )
                 _append_hint(
                     state,
                     context_manager,
-                    (
-                        f"No meaningful progress for {no_progress_rounds} tool "
-                        "rounds. Re-check your assumptions and inspect the "
-                        "relevant files before trying another change."
-                    ),
+                    recovery,
                     trace=self._trace,
                     step=state.step,
                 )
             context_manager.set_verification_status(verification.latest_summary())
             _sync_verification_state(state, verification, no_progress_rounds)
+            self._record_trace(
+                "step_summary",
+                state.step,
+                {
+                    "tools": len(executed_calls),
+                    "succeeded": sum(
+                        observation.success for _call, observation in executed_calls
+                    ),
+                    "failed": sum(
+                        not observation.success
+                        for _call, observation in executed_calls
+                    ),
+                    "current_plan_step": _current_plan_step(plan_store.plan),
+                    "verification": verification.status.value,
+                    "no_progress_rounds": no_progress_rounds,
+                },
+            )
 
         state.status = AgentStatus.MAX_STEPS
         state.final_answer = None
         _sync_verification_state(state, verification, no_progress_rounds)
+        self._record_incomplete(state, verification)
+        return state
+
+    def _record_incomplete(
+        self,
+        state: AgentState,
+        verification: VerificationTracker,
+    ) -> None:
         self._record_trace(
             "final",
             state.step,
             {
                 "status": "INCOMPLETE",
                 "verification_status": verification.status.value,
-                "answer_characters": 0,
+                "answer_characters": len(state.final_answer or ""),
+                "mode": state.mode.value,
             },
         )
-        return state
+
+    def _create_model_response(
+        self,
+        request: ModelRequest,
+        *,
+        step: int,
+    ) -> ModelResponse:
+        """Retry only transient provider failures without consuming agent steps."""
+
+        max_attempts = self._max_model_retries + 1
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return self._model_client.create_response(request)
+            except ModelCommunicationError as error:
+                retryable = isinstance(error, _RETRYABLE_MODEL_ERRORS)
+                will_retry = retryable and attempt < max_attempts
+                self._record_trace(
+                    "model_error",
+                    step,
+                    {
+                        "error_type": type(error).__name__,
+                        "retryable": retryable,
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                        "will_retry": will_retry,
+                        "status_code": getattr(error, "status_code", None),
+                    },
+                )
+                if will_retry:
+                    self._record_trace(
+                        "recovery",
+                        step,
+                        {
+                            "reason": (
+                                "Transient model communication failure; retrying "
+                                f"request ({attempt}/{max_attempts})."
+                            )
+                        },
+                    )
+                    continue
+                self._record_trace(
+                    "final",
+                    step,
+                    {
+                        "status": "ERROR",
+                        "error_type": type(error).__name__,
+                        "retryable": retryable,
+                    },
+                )
+                raise
 
     def _record_trace(
         self,
@@ -275,6 +547,16 @@ class AgentLoop:
     ) -> None:
         if self._trace is not None:
             self._trace.record(event, step=step, payload=payload)
+
+    def _publish_live(
+        self,
+        event: str,
+        step: int,
+        payload: dict[str, object],
+    ) -> None:
+        publisher = getattr(self._trace, "publish", None)
+        if callable(publisher):
+            publisher(event, step=step, payload=payload)
 
 
 def _sync_verification_state(
@@ -287,6 +569,40 @@ def _sync_verification_state(
     state.verification_status = tracker.status
     state.repeated_failure_count = tracker.repeated_failure_count
     state.no_progress_rounds = no_progress_rounds
+
+
+def _plan_is_complete(plan) -> bool:
+    return bool(plan.steps) and all(
+        step.status.value == "completed" for step in plan.steps
+    )
+
+
+def _current_plan_step(plan) -> str | None:
+    if plan is None:
+        return None
+    active = next(
+        (step.step_id for step in plan.steps if step.status.value == "in_progress"),
+        None,
+    )
+    if active is not None:
+        return active
+    return next(
+        (step.step_id for step in plan.steps if step.status.value == "pending"),
+        None,
+    )
+
+
+def _call_signature(call) -> tuple[str, str]:
+    try:
+        arguments = json.loads(call.arguments_json)
+    except (TypeError, json.JSONDecodeError):
+        return call.name, call.arguments_json
+    return call.name, json.dumps(
+        arguments,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _append_hint(
@@ -343,6 +659,21 @@ def _final_verification_hint(tracker: VerificationTracker) -> str:
     )
 
 
+def _patch_failure_hint(observation) -> str:
+    reason = "unknown patch validation failure"
+    if isinstance(observation.content, Mapping):
+        value = observation.content.get("failure_reason")
+        if isinstance(value, str) and value.strip():
+            reason = value.strip()
+    return (
+        f"The patch was rejected atomically and no files changed: {reason}. "
+        "Do not repeat the identical patch. If context did not match or was "
+        "ambiguous, read the target once, then use smaller exact old_lines that "
+        "identify one location. For a small file only, write_file is an explicit "
+        "fallback after patching has genuinely failed."
+    )
+
+
 def _context_usage_payload(usage) -> dict[str, object]:
     return {
         "input_characters": usage.input_characters,
@@ -351,6 +682,29 @@ def _context_usage_payload(usage) -> dict[str, object]:
         "recent_observations": usage.recent_observations,
         "compacted_observations": usage.compacted_observations,
     }
+
+
+def _execution_context(state: AgentState) -> str:
+    """Render immutable local path facts that summaries must not guess."""
+
+    workspace = str(state.workspace)
+    launch_directory = str(state.launch_directory)
+    location_guidance = (
+        "The user launched DBA from inside the workspace."
+        if state.launch_directory == state.workspace
+        else (
+            "The user launched DBA from a nested directory. Commands executed by "
+            "tools still use the workspace root unless their validated cwd says "
+            "otherwise. If giving manual commands, explain any required cd step."
+        )
+    )
+    return (
+        f"Absolute workspace root: {workspace}\n"
+        f"User launch directory: {launch_directory}\n"
+        "All relative repository tool paths are rooted at the absolute workspace "
+        "above. Do not replace it with a parent repository or infer another root.\n"
+        f"{location_guidance}"
+    )
 
 
 def _model_response_payload(response: ModelResponse) -> dict[str, object]:
@@ -378,6 +732,33 @@ def _argument_keys(arguments_json: str) -> list[str]:
     except (TypeError, json.JSONDecodeError):
         return []
     return sorted(str(key) for key in arguments) if isinstance(arguments, dict) else []
+
+
+def _tool_start_payload(call) -> dict[str, object]:
+    arguments = _parse_arguments(call.arguments_json)
+    payload: dict[str, object] = {
+        "call_id": call.call_id,
+        "tool_name": call.name,
+        "argument_keys": sorted(str(key) for key in arguments),
+    }
+    for key in ("path", "query", "symbol_id", "cwd"):
+        value = arguments.get(key)
+        if isinstance(value, str):
+            payload[key] = value
+            payload.setdefault("target", value)
+    command = arguments.get("command")
+    if isinstance(command, Sequence) and not isinstance(command, (str, bytes)):
+        payload["command"] = _safe_command(
+            [str(item) for item in command if isinstance(item, str)]
+        )
+    files = arguments.get("files")
+    if isinstance(files, Sequence) and not isinstance(files, (str, bytes)):
+        payload["files"] = [
+            str(item.get("path"))
+            for item in files
+            if isinstance(item, Mapping) and isinstance(item.get("path"), str)
+        ]
+    return payload
 
 
 def _tool_result_payload(call, observation) -> dict[str, object]:

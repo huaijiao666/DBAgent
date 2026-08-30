@@ -127,6 +127,20 @@ def test_only_function_tools_are_serialized_and_calls_are_normalized() -> None:
     assert result.function_calls[0].arguments_json == '{"path":"README.md"}'
 
 
+def test_responses_request_can_disable_tools_for_finalization() -> None:
+    sdk = _sdk_client(_response(output=[{"type": "message"}]))
+    client = OpenAIResponsesClient(_config(), sdk_client=sdk)
+    tool = FunctionTool(
+        name="read_file",
+        description="Read a file.",
+        parameters={"type": "object", "properties": {}, "additionalProperties": False},
+    )
+
+    client.create_response(ModelRequest(input="finish", tools=(tool,), tool_choice="none"))
+
+    assert sdk.responses.create.call_args.kwargs["tool_choice"] == "none"
+
+
 def test_non_function_tool_values_are_rejected() -> None:
     sdk = _sdk_client()
     client = OpenAIResponsesClient(_config(), sdk_client=sdk)

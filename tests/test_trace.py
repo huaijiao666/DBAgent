@@ -34,6 +34,21 @@ def test_trace_is_jsonl_and_redacts_sensitive_values(tmp_path: Path) -> None:
     assert "TOOL -> run_command" in console.getvalue()
 
 
+def test_trace_appends_across_process_restarts(tmp_path: Path) -> None:
+    path = tmp_path / ".forge" / "trace.jsonl"
+
+    with TraceRecorder(path, workspace=tmp_path) as first:
+        first.record("run_started", step=0, payload={"run": 1})
+    with TraceRecorder(path, workspace=tmp_path) as second:
+        second.record("run_started", step=0, payload={"run": 2})
+
+    events = [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [event["payload"]["run"] for event in events] == [1, 2]
+
+
 def test_trace_console_renderer_shows_model_usage_and_verification(
     tmp_path: Path,
 ) -> None:
@@ -68,6 +83,25 @@ def test_trace_console_renderer_shows_model_usage_and_verification(
     output = console.getvalue()
     assert "context=321~tok" in output
     assert "VERIFY: status=passed" in output
+
+
+def test_transient_assistant_update_is_rendered_but_not_persisted(
+    tmp_path: Path,
+) -> None:
+    console = io.StringIO()
+    path = tmp_path / "trace.jsonl"
+    recorder = TraceRecorder(path, console=True, stream=console)
+    try:
+        recorder.publish(
+            "assistant_update",
+            step=1,
+            payload={"text": "I will inspect the entry point."},
+        )
+    finally:
+        recorder.close()
+
+    assert "assistant_update" in console.getvalue()
+    assert path.read_text(encoding="utf-8") == ""
 
 
 class _ScriptedModel:
@@ -107,7 +141,7 @@ def test_loop_trace_contains_plan_and_recovery_events(tmp_path: Path) -> None:
             {
                 "id": "inspect",
                 "description": "Inspect files",
-                "status": "pending",
+                "status": "completed",
             }
         ],
     }
@@ -135,6 +169,7 @@ def test_loop_trace_contains_plan_and_recovery_events(tmp_path: Path) -> None:
             model,
             create_coding_registry(tmp_path),
             max_steps=5,
+            mode="code",
             trace=trace,
         ).run("Inspect repository", workspace=tmp_path)
     finally:

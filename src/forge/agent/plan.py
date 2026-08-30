@@ -95,6 +95,10 @@ class TaskPlan:
         )
         return "\n".join(lines)
 
+    @property
+    def is_complete(self) -> bool:
+        return all(step.status is PlanStepStatus.COMPLETED for step in self.steps)
+
 
 @dataclass(slots=True)
 class PlanStore:
@@ -102,6 +106,15 @@ class PlanStore:
 
     _plan: TaskPlan | None = None
     _history: list[TaskPlan] = field(default_factory=list)
+
+    @classmethod
+    def resume(cls, plan: TaskPlan | None) -> PlanStore:
+        """Start a new loop with one explicit, unfinished session plan."""
+
+        return cls(
+            _plan=plan,
+            _history=[plan] if plan is not None else [],
+        )
 
     @property
     def plan(self) -> TaskPlan | None:
@@ -129,12 +142,15 @@ class PlanStore:
                 },
             )
 
+        changed = candidate != self._plan
         self._plan = candidate
-        self._history.append(candidate)
+        if changed:
+            self._history.append(candidate)
         return ToolResult(
             success=True,
             content={
-                "updated": True,
+                "updated": changed,
+                "changed": changed,
                 "plan": candidate.to_dict(),
                 "update_number": len(self._history),
             },

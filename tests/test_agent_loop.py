@@ -1,9 +1,17 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from forge.agent import AgentLoop, AgentStatus, ContextBudget
-from forge.llm import FunctionCall, FunctionTool, ModelResponse
-from forge.tools import ToolDefinition, ToolRegistry
+from forge.llm import (
+    FunctionCall,
+    FunctionTool,
+    ModelConnectionError,
+    ModelProtocolError,
+    ModelResponse,
+)
+from forge.tools import ToolDefinition, ToolRegistry, ToolResult
 
 
 class QueueModelClient:
@@ -98,6 +106,91 @@ def test_normal_termination_without_tool_call(tmp_path: Path) -> None:
     assert state.context_usage[0].input_characters <= 48_000
 
 
+def test_transient_model_error_is_retried_without_consuming_an_agent_step(
+    tmp_path: Path,
+) -> None:
+    class FlakyModel:
+        attempts = 0
+
+        def create_response(self, _request):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise ModelConnectionError("temporary provider outage")
+            return _response("resp_final", text="Recovered")
+
+    model = FlakyModel()
+    state = AgentLoop(
+        model,
+        _registry(),
+        max_steps=1,
+        max_model_retries=1,
+    ).run("inspect", workspace=tmp_path)
+
+    assert state.status is AgentStatus.COMPLETED
+    assert state.step == 1
+    assert model.attempts == 2
+
+
+def test_default_policy_retries_five_transient_model_failures(
+    tmp_path: Path,
+) -> None:
+    class VeryFlakyModel:
+        attempts = 0
+
+        def create_response(self, _request):
+            self.attempts += 1
+            if self.attempts <= 5:
+                raise ModelConnectionError("temporary provider outage")
+            return _response("resp_final", text="Recovered after five retries")
+
+    model = VeryFlakyModel()
+    state = AgentLoop(model, _registry(), max_steps=1).run(
+        "inspect",
+        workspace=tmp_path,
+    )
+
+    assert state.status is AgentStatus.COMPLETED
+    assert model.attempts == 6
+
+
+def test_non_retryable_model_error_is_not_retried_and_is_traced(
+    tmp_path: Path,
+) -> None:
+    class BrokenModel:
+        attempts = 0
+
+        def create_response(self, _request):
+            self.attempts += 1
+            raise ModelProtocolError("invalid model response")
+
+    class Trace:
+        def __init__(self) -> None:
+            self.events = []
+
+        def record(self, event, *, step, payload=None):
+            self.events.append((event, step, payload or {}))
+
+    model = BrokenModel()
+    trace = Trace()
+    with pytest.raises(ModelProtocolError):
+        AgentLoop(
+            model,
+            _registry(),
+            max_steps=2,
+            max_model_retries=3,
+            mode="code",
+            trace=trace,
+        ).run("inspect", workspace=tmp_path)
+
+    assert model.attempts == 1
+    assert [event[0] for event in trace.events] == [
+        "run_started",
+        "model_request",
+        "model_error",
+        "final",
+    ]
+
+
 def test_multiple_consecutive_tool_calls_are_fed_back_to_model(
     tmp_path: Path,
 ) -> None:
@@ -111,7 +204,7 @@ def test_multiple_consecutive_tool_calls_are_fed_back_to_model(
         ]
     )
 
-    state = AgentLoop(model, _registry(), max_steps=5).run(
+    state = AgentLoop(model, _registry(), max_steps=5, mode="code").run(
         "inspect", workspace=tmp_path
     )
 
@@ -143,7 +236,9 @@ def test_tool_failure_is_observed_and_loop_continues(tmp_path: Path) -> None:
         ]
     )
 
-    state = AgentLoop(model, _registry(fail)).run("inspect", workspace=tmp_path)
+    state = AgentLoop(model, _registry(fail), mode="code").run(
+        "inspect", workspace=tmp_path
+    )
 
     assert state.status is AgentStatus.COMPLETED
     assert state.observations[0].success is False
@@ -151,6 +246,41 @@ def test_tool_failure_is_observed_and_loop_continues(tmp_path: Path) -> None:
     feedback = model.requests[1].input[-1]
     assert json.loads(feedback["output"])["ok"] is False
 
+
+def test_patch_failure_adds_actionable_recovery_context(tmp_path: Path) -> None:
+    definition = ToolDefinition(
+        schema=FunctionTool(
+            name="apply_patch",
+            description="test patch",
+            parameters={"type": "object", "properties": {}},
+        ),
+        handler=lambda _arguments: ToolResult(
+            success=False,
+            content={
+                "applied": False,
+                "changed_files": [],
+                "hunks_applied": 0,
+                "failure_reason": "PatchError: context did not match",
+            },
+        ),
+    )
+    call = FunctionCall("patch_1", "apply_patch", "{}")
+    model = QueueModelClient(
+        [
+            _response("patch", calls=(call,)),
+            _response("final", text="Patch failure reported"),
+        ]
+    )
+
+    state = AgentLoop(model, ToolRegistry([definition]), mode="code").run(
+        "fix it",
+        workspace=tmp_path,
+    )
+
+    assert state.status is AgentStatus.COMPLETED
+    assert any("rejected atomically" in hint for hint in state.recovery_hints)
+    second_input = json.dumps(model.requests[1].input, ensure_ascii=False)
+    assert "Do not repeat the identical patch" in second_input
 
 def test_unknown_tool_is_observed_and_loop_continues(tmp_path: Path) -> None:
     model = QueueModelClient(
@@ -211,6 +341,7 @@ def test_agent_loop_sends_bounded_context_and_records_usage(tmp_path: Path) -> N
     state = AgentLoop(
         model,
         _registry(lambda _arguments: "z" * 50_000),
+        mode="code",
         context_budget=budget,
     ).run("inspect", workspace=tmp_path)
 
@@ -251,7 +382,7 @@ def test_model_updates_one_persisted_plan_across_tool_turns(tmp_path: Path) -> N
         **initial_plan,
         "steps": [
             {**initial_plan["steps"][0], "status": "completed"},
-            {**initial_plan["steps"][1], "status": "in_progress"},
+            {**initial_plan["steps"][1], "status": "completed"},
         ],
     }
     plan_call = FunctionCall(
@@ -273,14 +404,14 @@ def test_model_updates_one_persisted_plan_across_tool_turns(tmp_path: Path) -> N
         ]
     )
 
-    state = AgentLoop(model, _registry()).run(
+    state = AgentLoop(model, _registry(), mode="code").run(
         "Inspect the repository", workspace=tmp_path
     )
 
     assert state.status is AgentStatus.COMPLETED
     assert state.plan is not None
     assert state.plan.steps[0].status.value == "completed"
-    assert state.plan.steps[1].status.value == "in_progress"
+    assert state.plan.steps[1].status.value == "completed"
     assert len(state.plan_history) == 2
     plan_context = str(model.requests[2].input[1]["content"])
     assert "[Current plan]" in plan_context

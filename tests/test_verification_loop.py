@@ -268,6 +268,46 @@ def test_no_progress_rounds_add_recovery_guidance_to_next_request(
 
     assert state.status is AgentStatus.COMPLETED
     assert state.no_progress_rounds == 2
-    assert any("No meaningful progress" in hint for hint in state.recovery_hints)
+    assert any("repeating evidence" in hint for hint in state.recovery_hints)
     next_context = str(model.requests[2].input[1]["content"])
-    assert "Re-check your assumptions" in next_context
+    assert "Stop exploring and answer" in next_context
+
+
+def test_meaningful_plan_transition_resets_no_progress_rounds(
+    tmp_path: Path,
+) -> None:
+    initial_plan = {
+        "goal": "Inspect and explain",
+        "success_criteria": ["an explanation is produced"],
+        "steps": [
+            {"id": "inspect", "description": "Inspect files", "status": "in_progress"},
+            {"id": "explain", "description": "Explain findings", "status": "pending"},
+        ],
+    }
+    progressed_plan = {
+        **initial_plan,
+        "steps": [
+            {"id": "inspect", "description": "Inspect files", "status": "completed"},
+            {"id": "explain", "description": "Explain findings", "status": "completed"},
+        ],
+    }
+    model = ScriptedModelClient(
+        [
+            _tool_response("resp_plan_1", "plan_1", "update_plan", initial_plan),
+            _tool_response("resp_unknown_1", "unknown_1", "missing_tool", {}),
+            _tool_response("resp_plan_2", "plan_2", "update_plan", progressed_plan),
+            _tool_response("resp_unknown_2", "unknown_2", "missing_tool", {}),
+            _final_response(),
+        ]
+    )
+
+    state = AgentLoop(
+        model,
+        create_coding_registry(tmp_path),
+        max_steps=5,
+        mode="code",
+    ).run("Inspect and explain the repository.", workspace=tmp_path)
+
+    assert state.status is AgentStatus.COMPLETED
+    assert state.no_progress_rounds == 1
+    assert not any("No meaningful progress" in hint for hint in state.recovery_hints)

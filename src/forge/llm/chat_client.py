@@ -133,7 +133,7 @@ class OpenAIChatCompletionsClient:
             parameters["max_tokens"] = request.max_output_tokens
         if tools:
             parameters["tools"] = tools
-            parameters["tool_choice"] = "auto"
+            parameters["tool_choice"] = request.tool_choice
             parameters["parallel_tool_calls"] = request.parallel_tool_calls
         return parameters
 

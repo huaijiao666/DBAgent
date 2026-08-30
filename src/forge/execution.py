@@ -205,7 +205,7 @@ class CommandExecutor:
                     f"absolute command argument escapes workspace: {argument}"
                 )
         if (
-            executable in {"python", "python.exe"}
+            executable in {"python", "python.exe", "python3", "python3.exe"}
             and Path(arguments[0]).name == arguments[0]
         ):
             arguments = (sys.executable, *arguments[1:])

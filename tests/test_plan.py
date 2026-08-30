@@ -63,6 +63,30 @@ def test_plan_step_status_transitions_are_explicit() -> None:
     assert len(store.history) == 4
 
 
+def test_plan_store_marks_identical_snapshot_as_unchanged() -> None:
+    store = PlanStore()
+    first = store.apply(_plan(statuses=("in_progress", "pending")))
+    second = store.apply(_plan(statuses=("in_progress", "pending")))
+
+    assert first.content["changed"] is True
+    assert second.content["changed"] is False
+    assert second.content["updated"] is False
+    assert len(store.history) == 1
+
+
+def test_plan_store_can_resume_an_unfinished_session_plan() -> None:
+    original = PlanStore()
+    assert original.apply(_plan(statuses=("completed", "in_progress"))).success
+    plan = original.plan
+    assert plan is not None
+
+    resumed = PlanStore.resume(plan)
+
+    assert resumed.plan is plan
+    assert resumed.history == (plan,)
+    assert plan.is_complete is False
+
+
 def test_invalid_transition_and_plan_drift_are_rejected_without_mutation() -> None:
     store = PlanStore()
     assert store.apply(_plan()).success is True

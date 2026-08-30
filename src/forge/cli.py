@@ -7,9 +7,11 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from forge.agent import AgentLoop, AgentStatus, TaskPlan
+from forge.agent import AgentLoop, AgentStatus, TaskMode, TaskPlan, resolve_task_mode
 from forge.agent.verification import VerificationStatus
 from forge.config import ConfigurationError, ForgeConfig
+from forge.console import safe_print
+from forge.discovery import discover_workspace
 from forge.llm import (
     ModelCommunicationError,
     OpenAIChatCompletionsClient,
@@ -29,14 +31,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--workspace",
         type=Path,
-        default=Path.cwd(),
-        help="Workspace root (default: current directory).",
+        default=None,
+        help="Workspace root (default: auto-detect from current directory).",
     )
     parser.add_argument(
         "--max-steps",
         type=_positive_integer,
-        default=12,
-        help="Maximum model turns before hard termination (default: 12).",
+        default=24,
+        help="Maximum model turns before hard termination (default: 24).",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=[mode.value for mode in TaskMode],
+        default=TaskMode.AUTO.value,
+        help="Task mode: auto, ask, or code (default: auto).",
     )
     parser.add_argument(
         "--trace-file",
@@ -50,7 +58,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     ui = None
     try:
         config = ForgeConfig.from_env()
-        workspace_root = Workspace(arguments.workspace).root
+        discovery = (
+            discover_workspace(Path.cwd())
+            if arguments.workspace is None
+            else None
+        )
+        workspace_candidate = (
+            discovery.root if discovery is not None else arguments.workspace
+        )
+        workspace_root = Workspace(workspace_candidate).root
         trace_path = _resolve_trace_path(workspace_root, arguments.trace_file)
         ui = TerminalUI()
         ui.start(
@@ -58,6 +74,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             workspace=workspace_root,
             model=config.model,
             max_steps=arguments.max_steps,
+            mode=resolve_task_mode(arguments.task, arguments.mode).value,
         )
         trace = TraceRecorder(
             trace_path,
@@ -66,17 +83,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             renderer=ui,
         )
         model_client = _create_model_client(config)
-        registry = create_coding_registry(arguments.workspace)
+        registry = create_coding_registry(workspace_root)
         state = AgentLoop(
             model_client,
             registry,
             max_steps=arguments.max_steps,
+            mode=arguments.mode,
             trace=trace,
-        ).run(arguments.task, workspace=arguments.workspace)
+        ).run(
+            arguments.task,
+            workspace=workspace_root,
+            launch_directory=(
+                discovery.start if discovery is not None else workspace_root
+            ),
+        )
     except (ConfigurationError, ModelCommunicationError, OSError, ValueError) as error:
         if ui is not None:
             ui.error(str(error))
-        print(f"Forge failed: {error}", file=sys.stderr)
+        safe_print(f"Forge failed: {error}", stream=sys.stderr)
         return 1
     finally:
         if trace is not None:
@@ -88,31 +112,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         _print_plan_history(getattr(state, "plan_history", ()))
     if state.status is AgentStatus.MAX_STEPS:
-        print(
+        safe_print(
             f"INCOMPLETE: Forge stopped after reaching max_steps={state.max_steps}.",
-            file=sys.stderr,
+            stream=sys.stderr,
         )
         return 2
 
     if getattr(state, "verification_status", None) is VerificationStatus.PASSED:
-        print("VERIFIED", file=sys.stderr)
-    print(state.final_answer or "")
+        safe_print("VERIFIED", stream=sys.stderr)
+    safe_print(state.final_answer or "")
     return 0
 
 
 def _print_plan_history(plan_history: Sequence[TaskPlan]) -> None:
-    """Display every accepted plan snapshot so status changes are observable."""
+    """Display only the latest plan; transitions were already shown live."""
 
     if not plan_history:
         return
-    print("Plan status updates:", file=sys.stderr)
-    for number, plan in enumerate(plan_history, start=1):
-        print(f"  update {number}: {plan.goal}", file=sys.stderr)
-        for step in plan.steps:
-            print(
-                f"    [{step.status.value}] {step.step_id}: {step.description}",
-                file=sys.stderr,
-            )
+    plan = plan_history[-1]
+    safe_print(f"Current plan: {plan.goal}", stream=sys.stderr)
+    for step in plan.steps:
+        safe_print(
+            f"  [{step.status.value}] {step.step_id}: {step.description}",
+            stream=sys.stderr,
+        )
 
 
 def _create_model_client(config: ForgeConfig):

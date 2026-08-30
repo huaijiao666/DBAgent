@@ -53,6 +53,8 @@ def test_create_and_write_file(tmp_path: Path) -> None:
 
     assert created.success is True
     assert written.success is True
+    assert created.content["changed_files"] == ["new.py"]
+    assert written.content["changed_files"] == ["new.py"]
     assert (tmp_path / "new.py").read_text(encoding="utf-8") == "value = 2\n"
 
 

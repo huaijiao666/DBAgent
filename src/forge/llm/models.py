@@ -58,12 +58,15 @@ class ModelRequest:
     tools: tuple[FunctionTool, ...] = field(default_factory=tuple)
     max_output_tokens: int | None = None
     parallel_tool_calls: bool = False
+    tool_choice: str = "auto"
 
     def __post_init__(self) -> None:
         if isinstance(self.input, str) and not self.input.strip():
             raise ValueError("model input must not be empty")
         if self.max_output_tokens is not None and self.max_output_tokens <= 0:
             raise ValueError("max_output_tokens must be positive")
+        if self.tool_choice not in {"auto", "none", "required"}:
+            raise ValueError("tool_choice must be auto, none, or required")
 
 
 @dataclass(frozen=True, slots=True)

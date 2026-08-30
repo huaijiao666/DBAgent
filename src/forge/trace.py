@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, TextIO
 
+from forge.console import safe_print
+
 
 class ConsoleRenderer(Protocol):
     """Render one already-sanitized trace event for a human terminal."""
@@ -76,7 +78,37 @@ class TraceRecorder:
                 if self._renderer is not None
                 else _format_console_line(item)
             )
-            print(line, file=self._stream, flush=True)
+            safe_print(line, stream=self._stream, flush=True)
+
+    def publish(
+        self,
+        event: str,
+        *,
+        step: int,
+        payload: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Render a sanitized transient event without persisting it to JSONL.
+
+        Model preambles improve the live terminal experience but are not stored:
+        the durable trace retains structured metadata instead of arbitrary model
+        prose that could echo sensitive user input.
+        """
+
+        if not self.console:
+            return
+        item = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "elapsed_ms": round((time.monotonic() - self._started) * 1000),
+            "step": step,
+            "event": event,
+            "payload": _sanitize(dict(payload or {})),
+        }
+        line = (
+            self._renderer.render_event(item)
+            if self._renderer is not None
+            else _format_console_line(item)
+        )
+        safe_print(line, stream=self._stream, flush=True)
 
     def close(self) -> None:
         if not self._file.closed:
@@ -91,7 +123,8 @@ class TraceRecorder:
     @staticmethod
     def _open(path: Path) -> TextIO:
         path.parent.mkdir(parents=True, exist_ok=True)
-        return path.open("w", encoding="utf-8", newline="\n")
+        # Preserve earlier evidence when DBA restarts or resumes a workspace.
+        return path.open("a", encoding="utf-8", newline="\n")
 
 
 def _sanitize(value: Any, *, key: str = "") -> Any:
@@ -109,6 +142,12 @@ def _sanitize(value: Any, *, key: str = "") -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
+
+
+def sanitize_for_storage(value: Any) -> Any:
+    """Return the same recursively redacted representation used by traces."""
+
+    return _sanitize(value)
 
 
 def _format_console_line(item: Mapping[str, Any]) -> str:

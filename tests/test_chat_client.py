@@ -184,6 +184,20 @@ def test_chat_tool_calls_are_normalized_to_existing_function_call_contract() -> 
     assert result.usage.total_tokens == 17
 
 
+def test_chat_request_can_disable_tools_for_finalization() -> None:
+    sdk = _sdk(_response(content="done"))
+    client = OpenAIChatCompletionsClient(_config(), sdk_client=sdk)
+    tool = FunctionTool(
+        name="read_file",
+        description="Read a file.",
+        parameters={"type": "object", "properties": {}, "additionalProperties": False},
+    )
+
+    client.create_response(ModelRequest(input="finish", tools=(tool,), tool_choice="none"))
+
+    assert sdk.chat.completions.create.call_args.kwargs["tool_choice"] == "none"
+
+
 def test_chat_protocol_rejects_non_function_tool_calls() -> None:
     raw_tool_call = SimpleNamespace(
         id="call_123",

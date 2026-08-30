@@ -7,6 +7,7 @@ from forge.agent.context import (
     ContextUsage,
 )
 from forge.agent.loop import AgentLoop
+from forge.agent.mode import TaskMode, resolve_task_mode
 from forge.agent.plan import (
     PlanStep,
     PlanStepStatus,
@@ -26,6 +27,8 @@ __all__ = [
     "AgentLoop",
     "AgentState",
     "AgentStatus",
+    "TaskMode",
+    "resolve_task_mode",
     "ContextBudget",
     "ContextManager",
     "ContextSnapshot",

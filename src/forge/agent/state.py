@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from forge.agent.context import ContextUsage
+from forge.agent.mode import TaskMode
 from forge.agent.plan import TaskPlan
 from forge.agent.verification import (
     VerificationRecord,
@@ -29,8 +30,10 @@ class AgentState:
 
     task: str
     workspace: Path
+    launch_directory: Path
     max_steps: int
     context: list[dict[str, Any]]
+    mode: TaskMode = TaskMode.CODE
     step: int = 0
     status: AgentStatus = AgentStatus.RUNNING
     response_ids: list[str] = field(default_factory=list)
@@ -54,14 +57,26 @@ class AgentState:
         return self.verification_status is VerificationStatus.PASSED
 
     @classmethod
-    def start(cls, *, task: str, workspace: Path, max_steps: int) -> AgentState:
+    def start(
+        cls,
+        *,
+        task: str,
+        workspace: Path,
+        launch_directory: Path | None = None,
+        max_steps: int,
+        mode: TaskMode = TaskMode.CODE,
+    ) -> AgentState:
         if not task.strip():
             raise ValueError("task must not be empty")
         if max_steps <= 0:
             raise ValueError("max_steps must be positive")
+        resolved_workspace = workspace.resolve()
+        resolved_launch_directory = (launch_directory or workspace).resolve()
         return cls(
             task=task,
-            workspace=workspace.resolve(),
+            workspace=resolved_workspace,
+            launch_directory=resolved_launch_directory,
             max_steps=max_steps,
             context=[{"role": "user", "content": task}],
+            mode=mode,
         )

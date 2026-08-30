@@ -7,6 +7,7 @@ import sys
 from collections.abc import Sequence
 
 from forge.config import ForgeConfig
+from forge.console import safe_print
 from forge.llm import (
     ModelCommunicationError,
     ModelRequest,
@@ -33,13 +34,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         response = client.create_response(ModelRequest(input=arguments.prompt))
     except ModelCommunicationError as error:
-        print(f"Smoke test failed: {error}", file=sys.stderr)
+        safe_print(f"Smoke test failed: {error}", stream=sys.stderr)
         return 1
 
-    print(f"model: {response.model}")
-    print(f"response_id: {response.response_id}")
-    print(f"status: {response.status}")
-    print(response.output_text)
+    safe_print(f"model: {response.model}")
+    safe_print(f"response_id: {response.response_id}")
+    safe_print(f"status: {response.status}")
+    safe_print(response.output_text)
     return 0
 
 

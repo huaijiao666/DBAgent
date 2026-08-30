@@ -77,9 +77,9 @@ def test_cli_displays_plan_status_updates(monkeypatch, capsys, tmp_path) -> None
     captured = capsys.readouterr()
     assert exit_code == 0
     assert captured.out == "Architecture summary\n"
-    assert "Plan status updates:" in captured.err
-    assert "[completed] inspect" in captured.err
-    assert "[in_progress] explain" in captured.err
+    assert "Current plan:" in captured.err
+    assert "inspect: Inspect files [completed]" in captured.err
+    assert "explain: Explain structure [in_progress]" in captured.err
     assert "VERIFIED" in captured.err
 
 

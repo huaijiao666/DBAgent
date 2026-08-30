@@ -48,6 +48,38 @@ def test_readonly_tools_list_read_and_search(tmp_path: Path) -> None:
     assert search.content == "README.md:1: Architecture notes"
 
 
+def test_list_and_search_ignore_agent_trace_directory(tmp_path: Path) -> None:
+    (tmp_path / "source.py").write_text("needle = 1\n", encoding="utf-8")
+    trace_directory = tmp_path / ".forge"
+    trace_directory.mkdir()
+    (trace_directory / "trace.jsonl").write_text(
+        '{"model_output":"needle secret"}\n',
+        encoding="utf-8",
+    )
+    registry = create_readonly_registry(tmp_path)
+
+    listed = _dispatch(registry, "list_files", {"path": "."})
+    searched = _dispatch(
+        registry,
+        "search_text",
+        {"query": "needle", "path": "."},
+    )
+
+    assert listed.success is True
+    assert ".forge" not in listed.content
+    assert searched.success is True
+    assert "source.py:1" in searched.content
+    assert ".forge" not in searched.content
+
+    direct = _dispatch(
+        registry,
+        "read_file",
+        {"path": ".forge/trace.jsonl"},
+    )
+    assert direct.success is False
+    assert "metadata/cache directories is blocked" in direct.content
+
+
 def test_read_file_rejects_workspace_escape(tmp_path: Path) -> None:
     workspace = tmp_path / "repo"
     workspace.mkdir()

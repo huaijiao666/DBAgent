@@ -1,4 +1,4 @@
-# Forge end-to-end demo
+# DBAgent end-to-end demo
 
 The demo repository is `tests/fixtures/taskboard_repo`. It is a small but
 realistic Python project with separate `models`, `repository`, `service`, and
@@ -59,6 +59,25 @@ calls, patch results, verification status, and final status.
   parent Forge checkout when a workspace lacked its own `.git`. The command
   executor now sets `GIT_CEILING_DIRECTORIES` to the workspace parent, with a
   regression test. The fixture runs initialize their own local Git repository.
+
+### 2026-08-30 interactive UX regression run
+
+After adding the DBA REPL, the harness was also exercised from nested and
+non-Git workspaces with `gpt-5.6-terra` at reasoning effort `high`. These are
+debug runs, not a benchmark:
+
+| scenario | observed deterministic result | harness finding |
+| --- | --- | --- |
+| Explain the terminal snake project from `snake_game/` | `18 passed`; final answer produced in ASK mode | auto-discovery must retain the exact workspace and launch directory in every model turn |
+| Fix the calculator fixture | targeted pytest `1 passed` | structured patch file records were missing from the old UI summary |
+| Add priority across model/service/CLI | five files changed; full local pytest `10 passed` | a GBK terminal crashed on an unrepresentable model preamble; output is now encoding-safe |
+| Add tag-only search regression | focused `5 passed`; full `7 passed`; `VERIFIED` | failed patch recovery and near-budget verification guidance worked as intended |
+
+The priority run deliberately used a 14-turn cap. It reached the cap with a
+plan step still open and therefore reported `INCOMPLETE` even though targeted
+tests passed. This is the intended termination contract. A separate continuation
+run also exposed repeated unchanged reads, leading to more direct recovery
+guidance and exclusion of `.forge` traces from repository tools.
 
 ## Known limitations
 
