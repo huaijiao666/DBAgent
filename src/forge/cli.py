@@ -11,7 +11,7 @@ from forge.agent import AgentLoop, AgentStatus, TaskMode, TaskPlan, resolve_task
 from forge.agent.verification import VerificationStatus
 from forge.config import ConfigurationError, ForgeConfig
 from forge.console import safe_print
-from forge.discovery import discover_workspace
+from forge.discovery import select_workspace
 from forge.llm import (
     ModelCommunicationError,
     OpenAIChatCompletionsClient,
@@ -32,7 +32,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--workspace",
         type=Path,
         default=None,
-        help="Workspace root (default: auto-detect from current directory).",
+        help="Workspace root (default: the exact current directory).",
+    )
+    parser.add_argument(
+        "--discover-workspace",
+        action="store_true",
+        help="Opt in to searching parent directories for a project root.",
     )
     parser.add_argument(
         "--max-steps",
@@ -58,15 +63,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     ui = None
     try:
         config = ForgeConfig.from_env()
-        discovery = (
-            discover_workspace(Path.cwd())
-            if arguments.workspace is None
-            else None
+        discovery = select_workspace(
+            arguments.workspace or Path.cwd(),
+            discover_parent=arguments.discover_workspace,
         )
-        workspace_candidate = (
-            discovery.root if discovery is not None else arguments.workspace
-        )
-        workspace_root = Workspace(workspace_candidate).root
+        workspace_root = Workspace(discovery.root).root
         trace_path = _resolve_trace_path(workspace_root, arguments.trace_file)
         ui = TerminalUI()
         ui.start(
@@ -94,7 +95,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             arguments.task,
             workspace=workspace_root,
             launch_directory=(
-                discovery.start if discovery is not None else workspace_root
+                discovery.start
             ),
         )
     except (ConfigurationError, ModelCommunicationError, OSError, ValueError) as error:

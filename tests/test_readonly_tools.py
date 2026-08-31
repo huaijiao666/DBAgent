@@ -48,6 +48,32 @@ def test_readonly_tools_list_read_and_search(tmp_path: Path) -> None:
     assert search.content == "README.md:1: Architecture notes"
 
 
+def test_read_file_can_return_a_specific_inclusive_line_range(tmp_path: Path) -> None:
+    (tmp_path / "module.py").write_text(
+        "one\ntwo\nthree\nfour\n", encoding="utf-8"
+    )
+    registry = create_readonly_registry(tmp_path)
+
+    observation = _dispatch(
+        registry,
+        "read_file",
+        {"path": "module.py", "start_line": 2, "end_line": 3},
+    )
+
+    assert observation.success is True
+    assert observation.content == "2: two\n3: three"
+
+
+def test_read_file_returns_a_clear_result_for_an_empty_file(tmp_path: Path) -> None:
+    (tmp_path / "empty.txt").write_text("", encoding="utf-8")
+    registry = create_readonly_registry(tmp_path)
+
+    observation = _dispatch(registry, "read_file", {"path": "empty.txt"})
+
+    assert observation.success is True
+    assert observation.content == "[empty file]"
+
+
 def test_list_and_search_ignore_agent_trace_directory(tmp_path: Path) -> None:
     (tmp_path / "source.py").write_text("needle = 1\n", encoding="utf-8")
     trace_directory = tmp_path / ".forge"

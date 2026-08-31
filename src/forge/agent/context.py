@@ -16,18 +16,18 @@ from forge.tools.models import ToolObservation
 class ContextBudget:
     """Character budgets used as a tokenizer-independent context boundary."""
 
-    max_context_characters: int = 48_000
-    max_task_characters: int = 6_000
-    max_plan_characters: int = 3_000
-    max_repository_map_characters: int = 8_000
-    max_relevant_code_characters: int = 8_000
-    max_compact_observations_characters: int = 6_000
-    max_recent_observations_characters: int = 12_000
-    max_single_observation_characters: int = 3_500
-    max_call_arguments_characters: int = 1_500
-    recent_observation_count: int = 4
-    max_verification_characters: int = 3_000
-    max_runtime_guidance_characters: int = 3_000
+    max_context_characters: int = 80_000
+    max_task_characters: int = 8_000
+    max_plan_characters: int = 4_000
+    max_repository_map_characters: int = 12_000
+    max_relevant_code_characters: int = 12_000
+    max_compact_observations_characters: int = 12_000
+    max_recent_observations_characters: int = 24_000
+    max_single_observation_characters: int = 6_000
+    max_call_arguments_characters: int = 2_000
+    recent_observation_count: int = 8
+    max_verification_characters: int = 4_000
+    max_runtime_guidance_characters: int = 4_000
 
     def __post_init__(self) -> None:
         numeric_values = (

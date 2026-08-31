@@ -1,5 +1,6 @@
 import io
 import json
+import threading
 from pathlib import Path
 
 from forge.agent import AgentLoop, AgentStatus
@@ -102,6 +103,32 @@ def test_transient_assistant_update_is_rendered_but_not_persisted(
 
     assert "assistant_update" in console.getvalue()
     assert path.read_text(encoding="utf-8") == ""
+
+
+def test_model_wait_heartbeat_is_visible_but_not_persisted(tmp_path: Path) -> None:
+    console = io.StringIO()
+    path = tmp_path / "trace.jsonl"
+    recorder = TraceRecorder(
+        path,
+        console=True,
+        stream=console,
+        progress_interval_seconds=0.01,
+    )
+    recorder.record("model_request", step=1, payload={"context_usage": {}})
+    threading.Event().wait(0.05)
+    recorder.record(
+        "model_response",
+        step=1,
+        payload={"status": "completed", "function_call_count": 0},
+    )
+    recorder.close()
+
+    assert "MODEL waiting" in console.getvalue()
+    events = [
+        json.loads(line)["event"]
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert events == ["model_request", "model_response"]
 
 
 class _ScriptedModel:

@@ -1,0 +1,144 @@
+:root {
+  --bg: #0f172a;
+  --panel: #1e293b;
+  --accent: #38bdf8;
+  --food: #ef4444;
+  --head: #34d399;
+  --body: #22c55e;
+  --text: #e2e8f0;
+  --muted: #94a3b8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 12px;
+}
+
+#wrap {
+  width: 100%;
+  max-width: 720px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.6rem;
+  letter-spacing: 2px;
+  color: var(--accent);
+}
+
+#hud {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+#score-label {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+#score {
+  font-size: 1.4rem;
+  font-weight: 700;
+  min-width: 2ch;
+}
+
+#run {
+  background: var(--accent);
+  color: #082f49;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-weight: 700;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+#run:hover {
+  filter: brightness(1.1);
+}
+
+#board {
+  position: relative;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+}
+
+#game {
+  background: var(--panel);
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+#status {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  background: rgba(15, 23, 42, 0.82);
+  border-radius: 12px;
+  text-align: center;
+  font-size: 2rem;
+  font-weight: 800;
+  color: var(--text);
+  letter-spacing: 1px;
+}
+
+#status.show {
+  display: flex;
+}
+
+#status .sub {
+  font-size: 1rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+#help {
+  color: var(--muted);
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+kbd {
+  background: var(--panel);
+  border: 1px solid #334155;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-family: inherit;
+  font-size: 0.85rem;
+}

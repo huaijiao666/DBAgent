@@ -23,12 +23,24 @@ class Workspace:
         return resolved
 
     def resolve_for_create(self, user_path: str) -> Path:
-        """Resolve a new file target whose parent already exists."""
+        """Resolve a new file target, allowing missing in-workspace parents."""
 
         candidate = self._candidate(user_path)
-        parent = candidate.parent.resolve(strict=True)
-        self._validate_resolved(parent, user_path)
-        target = parent / candidate.name
+        cursor = candidate.parent
+        missing_parts: list[str] = []
+        while not cursor.exists():
+            if cursor.is_symlink():
+                raise ValueError(f"path contains a dangling symlink: {user_path}")
+            missing_parts.append(cursor.name)
+            if cursor.parent == cursor:
+                raise ValueError(f"path escapes workspace: {user_path}")
+            cursor = cursor.parent
+        resolved_parent = cursor.resolve(strict=True)
+        self._validate_resolved(resolved_parent, user_path)
+        for part in reversed(missing_parts):
+            resolved_parent /= part
+        self._validate_resolved(resolved_parent.resolve(strict=False), user_path)
+        target = resolved_parent / candidate.name
         self._validate_resolved(target.resolve(strict=False), user_path)
         if target.exists() or target.is_symlink():
             raise FileExistsError(f"path already exists: {user_path}")

@@ -11,6 +11,7 @@ def test_defaults_do_not_require_an_api_key() -> None:
     assert config.reasoning_effort == "medium"
     assert config.base_url is None
     assert config.api_mode == "responses"
+    assert config.provider == "configured"
 
 
 def test_values_are_loaded_from_the_environment_mapping() -> None:
@@ -19,6 +20,7 @@ def test_values_are_loaded_from_the_environment_mapping() -> None:
             "OPENAI_API_KEY": "from-environment",
             "FORGE_BASE_URL": "https://provider.example/v1",
             "FORGE_API_MODE": "CHAT_COMPLETIONS",
+            "FORGE_PROVIDER": "configured",
             "FORGE_MODEL": "custom-model",
             "FORGE_REASONING_EFFORT": "HIGH",
         }
@@ -29,6 +31,7 @@ def test_values_are_loaded_from_the_environment_mapping() -> None:
     assert config.reasoning_effort == "high"
     assert config.base_url == "https://provider.example/v1"
     assert config.api_mode == "chat_completions"
+    assert config.provider == "configured"
     assert "from-environment" not in repr(config)
 
 
@@ -50,3 +53,8 @@ def test_invalid_base_url_is_rejected() -> None:
 def test_unknown_api_mode_is_rejected() -> None:
     with pytest.raises(ConfigurationError, match="FORGE_API_MODE"):
         ForgeConfig.from_env({"FORGE_API_MODE": "legacy"})
+
+
+def test_deepseek_provider_requires_chat_completions() -> None:
+    with pytest.raises(ConfigurationError, match="requires FORGE_API_MODE"):
+        ForgeConfig.from_env({"FORGE_PROVIDER": "deepseek"})

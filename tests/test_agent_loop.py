@@ -8,6 +8,7 @@ from forge.llm import (
     FunctionCall,
     FunctionTool,
     ModelConnectionError,
+    ModelAPIError,
     ModelProtocolError,
     ModelResponse,
 )
@@ -191,6 +192,44 @@ def test_non_retryable_model_error_is_not_retried_and_is_traced(
     ]
 
 
+def test_transient_provider_api_error_is_retried(tmp_path: Path) -> None:
+    class TemporarilyUnavailableModel:
+        attempts = 0
+
+        def create_response(self, _request):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise ModelAPIError("provider unavailable", status_code=503)
+            return _response("done", text="Recovered.")
+
+    model = TemporarilyUnavailableModel()
+    state = AgentLoop(model, _registry(), max_steps=1).run(
+        "inspect",
+        workspace=tmp_path,
+    )
+
+    assert state.status is AgentStatus.COMPLETED
+    assert model.attempts == 2
+
+
+def test_invalid_provider_api_error_is_not_retried(tmp_path: Path) -> None:
+    class InvalidRequestModel:
+        attempts = 0
+
+        def create_response(self, _request):
+            self.attempts += 1
+            raise ModelAPIError("bad request", status_code=400)
+
+    model = InvalidRequestModel()
+    with pytest.raises(ModelAPIError):
+        AgentLoop(model, _registry(), max_steps=1).run(
+            "inspect",
+            workspace=tmp_path,
+        )
+
+    assert model.attempts == 1
+
+
 def test_multiple_consecutive_tool_calls_are_fed_back_to_model(
     tmp_path: Path,
 ) -> None:
@@ -282,6 +321,122 @@ def test_patch_failure_adds_actionable_recovery_context(tmp_path: Path) -> None:
     second_input = json.dumps(model.requests[1].input, ensure_ascii=False)
     assert "Do not repeat the identical patch" in second_input
 
+
+def test_successful_patch_withholds_next_patch_until_fresh_evidence(
+    tmp_path: Path,
+) -> None:
+    registry = ToolRegistry(
+        [
+            ToolDefinition(
+                schema=FunctionTool(
+                    name="apply_patch",
+                    description="patch",
+                    parameters={"type": "object", "properties": {}},
+                ),
+                handler=lambda _arguments: ToolResult(
+                    success=True,
+                    content={
+                        "applied": True,
+                        "changed_files": [{"path": "target.py"}],
+                        "hunks_applied": 1,
+                    },
+                ),
+            ),
+            ToolDefinition(
+                schema=FunctionTool(
+                    name="run_command",
+                    description="verify",
+                    parameters={"type": "object", "properties": {}},
+                ),
+                handler=lambda _arguments: {
+                    "command": ["python", "-m", "pytest", "-q"],
+                    "cwd": ".",
+                    "return_code": 0,
+                    "timed_out": False,
+                    "stdout": "1 passed",
+                    "stderr": "",
+                },
+            ),
+        ]
+    )
+    model = QueueModelClient(
+        [
+            _response("patch", calls=(FunctionCall("patch_1", "apply_patch", "{}"),)),
+            _response("verify", calls=(FunctionCall("verify_1", "run_command", "{}"),)),
+            _response("final", text="Verified."),
+        ]
+    )
+
+    state = AgentLoop(model, registry, mode="code", max_steps=4).run(
+        "fix it", workspace=tmp_path
+    )
+
+    assert state.status is AgentStatus.COMPLETED
+    assert "apply_patch" not in [tool.name for tool in model.requests[1].tools]
+    assert "run_command" in [tool.name for tool in model.requests[1].tools]
+
+
+def test_two_malformed_patch_calls_disable_patch_and_offer_write_fallback(
+    tmp_path: Path,
+) -> None:
+    registry = ToolRegistry(
+        [
+            ToolDefinition(
+                schema=FunctionTool(
+                    name="apply_patch",
+                    description="patch",
+                    parameters={"type": "object", "properties": {}},
+                ),
+                handler=lambda _arguments: "unreachable",
+            ),
+            ToolDefinition(
+                schema=FunctionTool(
+                    name="write_file",
+                    description="write",
+                    parameters={"type": "object", "properties": {}},
+                ),
+                handler=lambda _arguments: {"path": "small.txt"},
+            ),
+            ToolDefinition(
+                schema=FunctionTool(
+                    name="run_command",
+                    description="verify",
+                    parameters={"type": "object", "properties": {}},
+                ),
+                handler=lambda _arguments: {
+                    "command": ["pytest"],
+                    "cwd": ".",
+                    "return_code": 0,
+                    "timed_out": False,
+                    "stdout": "passed",
+                    "stderr": "",
+                },
+            ),
+        ]
+    )
+    malformed_first = FunctionCall("patch_1", "apply_patch", "{not json")
+    malformed_second = FunctionCall("patch_2", "apply_patch", "{not json")
+    write = FunctionCall("write_1", "write_file", "{}")
+    verify = FunctionCall("verify_1", "run_command", "{}")
+    model = QueueModelClient(
+        [
+            _response("first", calls=(malformed_first,)),
+            _response("second", calls=(malformed_second,)),
+            _response("write", calls=(write,)),
+            _response("verify", calls=(verify,)),
+            _response("final", text="Used the fallback"),
+        ]
+    )
+
+    state = AgentLoop(model, registry, mode="code", max_steps=6).run(
+        "fix it", workspace=tmp_path
+    )
+
+    assert state.status is AgentStatus.COMPLETED
+    assert "apply_patch" not in [tool.name for tool in model.requests[2].tools]
+    assert "write_file" in [tool.name for tool in model.requests[2].tools]
+    assert any("temporarily unavailable" in hint for hint in state.recovery_hints)
+
 def test_unknown_tool_is_observed_and_loop_continues(tmp_path: Path) -> None:
     model = QueueModelClient(
         [
@@ -319,6 +474,13 @@ def test_max_steps_is_a_hard_termination_condition(tmp_path: Path) -> None:
 
 
 def test_agent_loop_sends_bounded_context_and_records_usage(tmp_path: Path) -> None:
+    class Trace:
+        def __init__(self) -> None:
+            self.events = []
+
+        def record(self, event, *, step, payload=None):
+            self.events.append((event, step, payload or {}))
+
     model = QueueModelClient(
         [
             _response("resp_1", calls=(_call("call_large"),)),
@@ -338,11 +500,13 @@ def test_agent_loop_sends_bounded_context_and_records_usage(tmp_path: Path) -> N
         recent_observation_count=2,
     )
 
+    trace = Trace()
     state = AgentLoop(
         model,
         _registry(lambda _arguments: "z" * 50_000),
         mode="code",
         context_budget=budget,
+        trace=trace,
     ).run("inspect", workspace=tmp_path)
 
     second_input = model.requests[1].input
@@ -359,6 +523,9 @@ def test_agent_loop_sends_bounded_context_and_records_usage(tmp_path: Path) -> N
         usage.input_characters <= budget.max_context_characters
         for usage in state.context_usage
     )
+    compaction_events = [item for item in trace.events if item[0] == "context_compacted"]
+    assert len(compaction_events) == 1
+    assert compaction_events[0][2]["truncated_items"] == 1
 
 
 def test_model_updates_one_persisted_plan_across_tool_turns(tmp_path: Path) -> None:

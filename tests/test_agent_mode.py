@@ -67,6 +67,8 @@ def test_auto_mode_distinguishes_questions_from_mutations() -> None:
     assert resolve_task_mode("inspect and explain this repository") is TaskMode.ASK
     assert resolve_task_mode("修复 runner.py 的反向移动 bug") is TaskMode.CODE
     assert resolve_task_mode("add a regression test") is TaskMode.CODE
+    assert resolve_task_mode("写一个可玩的贪吃蛇游戏") is TaskMode.CODE
+    assert resolve_task_mode("怎么写一个可玩的贪吃蛇游戏？") is TaskMode.ASK
 
 
 def test_ask_mode_exposes_no_edit_or_plan_tools(tmp_path: Path) -> None:

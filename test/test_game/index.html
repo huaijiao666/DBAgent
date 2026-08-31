@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Snake</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="wrap">
+    <h1 class="title">Snake</h1>
+
+    <section class="hud">
+      <div class="stat">
+        <span class="label">Score</span>
+        <span id="score" class="value">0</span>
+      </div>
+      <div class="stat">
+        <span class="label">High</span>
+        <span id="high-score" class="value">0</span>
+      </div>
+      <div class="stat">
+        <span class="label">Length</span>
+        <span id="length" class="value">0</span>
+      </div>
+      <div class="status-pill-wrap">
+        <span id="status-pill" class="pill"></span>
+      </div>
+    </section>
+
+    <div class="board-wrap">
+      <canvas id="game-canvas" width="480" height="480"></canvas>
+
+      <div id="overlay-start" class="overlay">
+        <h2>Snake</h2>
+        <p>Arrows / WASD to move. Space to pause. Get all the apples!</p>
+        <button id="overlay-start-btn" class="btn">Start game</button>
+      </div>
+
+      <div id="overlay-pause" class="overlay hidden">
+        <h2>Paused</h2>
+        <button id="overlay-resume-btn" class="btn">Resume</button>
+      </div>
+
+      <div id="overlay-over" class="overlay hidden">
+        <h2 id="overlay-title">Game over</h2>
+        <p>Score: <span id="final-score">0</span></p>
+        <p id="high-score-badge" class="hidden">New high score!</p>
+        <button id="overlay-restart-btn" class="btn">Play again</button>
+      </div>
+    </div>
+
+    <section class="controls">
+      <div class="dpad">
+        <button data-dir="up">&uarr;</button>
+        <span></span>
+        <button data-dir="left">&larr;</button>
+        <button data-dir="down">&darr;</button>
+        <button data-dir="right">&rarr;</button>
+      </div>
+
+      <div class="buttons">
+        <button id="btn-primary" class="btn">Start</button>
+        <button id="btn-restart" class="btn ghost">Restart</button>
+      </div>
+    </section>
+
+    <p id="status" class="status-text">Press Start to play</p>
+  </main>
+
+  <script src="game.js"></script>
+</body>
+</html>

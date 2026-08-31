@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 from forge.agent.context import ContextBudget, ContextManager
 from forge.agent.mode import TaskMode, instructions_for_mode, resolve_task_mode
@@ -14,13 +14,14 @@ from forge.agent.state import AgentState, AgentStatus
 from forge.agent.verification import VerificationStatus, VerificationTracker
 from forge.llm import (
     ModelConnectionError,
+    ModelAPIError,
     ModelRateLimitError,
     ModelRequest,
     ModelResponse,
     ModelTimeoutError,
     ModelCommunicationError,
 )
-from forge.tools import ToolRegistry
+from forge.tools import ToolObservation, ToolRegistry
 
 _RECOVERY_AFTER_ROUNDS = 2
 _ASK_MAX_TOOL_ROUNDS = 3
@@ -30,6 +31,7 @@ _RETRYABLE_MODEL_ERRORS = (
     ModelTimeoutError,
     ModelRateLimitError,
 )
+_RETRYABLE_API_STATUS_CODES = frozenset({408, 409, 425, 500, 502, 503, 504})
 _READ_PROGRESS_TOOLS = {
     "get_repo_map",
     "search_symbol",
@@ -44,6 +46,7 @@ _ASK_TOOL_NAMES = {
     "git_diff",
     "run_command",
 }
+_PATCH_FRESHNESS_TOOLS = {"read_file", "git_diff", "run_command"}
 
 
 class ModelClient(Protocol):
@@ -76,6 +79,7 @@ class AgentLoop:
         initial_plan: TaskPlan | None = None,
         verification_required: bool = False,
         trace: TraceSink | None = None,
+        state_checkpoint: Callable[[AgentState], None] | None = None,
     ) -> None:
         if max_steps <= 0:
             raise ValueError("max_steps must be positive")
@@ -91,6 +95,7 @@ class AgentLoop:
         self._initial_plan = initial_plan
         self._verification_required = verification_required
         self._trace = trace
+        self._state_checkpoint = state_checkpoint
 
     def run(
         self,
@@ -117,6 +122,9 @@ class AgentLoop:
             mutation_generation=1 if self._verification_required else 0
         )
         no_progress_rounds = 0
+        malformed_patch_failures = 0
+        patch_reinspection_required = False
+        last_reported_compaction = (0, 0)
         ask_tool_rounds = 0
         seen_evidence: set[tuple[tuple[str, str], int]] = set()
         run_registry = (
@@ -149,6 +157,11 @@ class AgentLoop:
 
         while state.step < state.max_steps:
             state.step += 1
+            request_tool_schemas = (
+                tuple(tool for tool in tool_schemas if tool.name != "apply_patch")
+                if patch_reinspection_required
+                else tool_schemas
+            )
             snapshot = context_manager.build_context(step=state.step)
             state.context = list(snapshot.input_items)
             state.context_usage.append(snapshot.usage)
@@ -157,10 +170,28 @@ class AgentLoop:
                 state.step,
                 {
                     "input_items": len(snapshot.input_items),
-                    "tools": [tool.name for tool in tool_schemas],
+                    "tools": [tool.name for tool in request_tool_schemas],
                     "context_usage": _context_usage_payload(snapshot.usage),
                 },
             )
+            compaction = (
+                snapshot.usage.compacted_observations,
+                snapshot.usage.truncated_items,
+            )
+            if compaction != last_reported_compaction and any(compaction):
+                self._record_trace(
+                    "context_compacted",
+                    state.step,
+                    {
+                        "compacted_observations": snapshot.usage.compacted_observations,
+                        "recent_observations": snapshot.usage.recent_observations,
+                        "truncated_items": snapshot.usage.truncated_items,
+                        "input_characters": snapshot.usage.input_characters,
+                        "budget_characters": snapshot.usage.budget_characters,
+                        "approximate_tokens": snapshot.usage.approximate_tokens,
+                    },
+                )
+                last_reported_compaction = compaction
             force_final = (
                 (
                     state.step == state.max_steps
@@ -203,7 +234,7 @@ class AgentLoop:
                 ModelRequest(
                     input=snapshot.input_items,
                     instructions=request_instructions,
-                    tools=tool_schemas,
+                    tools=request_tool_schemas,
                     parallel_tool_calls=True,
                     tool_choice="none" if force_final else "auto",
                 ),
@@ -310,12 +341,28 @@ class AgentLoop:
             turn_repeated_evidence = False
             for call in response.function_calls:
                 state.tool_calls.append(call)
+                tool_start_payload = _tool_start_payload(call)
+                current_plan_step = _current_plan_step(plan_store.plan)
+                if current_plan_step:
+                    tool_start_payload["plan_step"] = current_plan_step
                 self._record_trace(
                     "tool_start",
                     state.step,
-                    _tool_start_payload(call),
+                    tool_start_payload,
                 )
-                observation = run_registry.dispatch(call)
+                if call.name == "apply_patch" and patch_reinspection_required:
+                    observation = ToolObservation(
+                        call_id=call.call_id,
+                        tool_name=call.name,
+                        success=False,
+                        content=(
+                            "apply_patch is temporarily withheld after a successful "
+                            "patch. First inspect the changed state with read_file, "
+                            "git_diff, or run_command; then request the next patch."
+                        ),
+                    )
+                else:
+                    observation = run_registry.dispatch(call)
                 state.observations.append(observation)
                 executed_calls.append((call, observation))
                 self._record_trace(
@@ -324,6 +371,8 @@ class AgentLoop:
                     _tool_result_payload(call, observation),
                 )
                 if call.name == "apply_patch" and not observation.success:
+                    if _has_malformed_arguments(observation):
+                        malformed_patch_failures += 1
                     _append_hint(
                         state,
                         context_manager,
@@ -331,7 +380,38 @@ class AgentLoop:
                         trace=self._trace,
                         step=state.step,
                     )
+                    if malformed_patch_failures == 2:
+                        tool_schemas = tuple(
+                            tool
+                            for tool in tool_schemas
+                            if tool.name != "apply_patch"
+                        )
+                        fallback = (
+                            "apply_patch produced malformed function arguments twice, "
+                            "so it is temporarily unavailable for the rest of this "
+                            "run. Do not retry it. For a small existing file you have "
+                            "already read, use write_file as the local fallback; then "
+                            "run a targeted deterministic verification."
+                        )
+                        _append_hint(
+                            state,
+                            context_manager,
+                            fallback,
+                            trace=self._trace,
+                            step=state.step,
+                        )
+                        self._record_trace(
+                            "tool_fallback",
+                            state.step,
+                            {
+                                "disabled_tool": "apply_patch",
+                                "reason": "two malformed argument payloads",
+                                "fallback_tool": "write_file",
+                            },
+                        )
                 event = verification.observe(call, observation)
+                if observation.success and call.name in _PATCH_FRESHNESS_TOOLS:
+                    patch_reinspection_required = False
                 turn_progress = turn_progress or event.mutation
                 if event.mutation:
                     _append_hint(
@@ -345,6 +425,20 @@ class AgentLoop:
                         trace=self._trace,
                         step=state.step,
                     )
+                    if call.name == "apply_patch":
+                        patch_reinspection_required = True
+                        _append_hint(
+                            state,
+                            context_manager,
+                            (
+                                "Before requesting another apply_patch, inspect or "
+                                "verify the changed state with read_file, git_diff, or "
+                                "run_command. apply_patch is temporarily withheld to "
+                                "prevent stale-context edits."
+                            ),
+                            trace=self._trace,
+                            step=state.step,
+                        )
                     _record_patch_event(self._trace, state.step, observation)
                 if observation.success and call.name in _EVIDENCE_PROGRESS_TOOLS:
                     signature = (
@@ -383,13 +477,6 @@ class AgentLoop:
                                 trace=self._trace,
                                 step=state.step,
                             )
-                else:
-                    _record_verification_event(
-                        self._trace,
-                        state.step,
-                        event.record,
-                        verification.status,
-                    )
                 if call.name == "update_plan" and observation.success:
                     # A real plan transition is meaningful progress. A repeated
                     # identical snapshot is intentionally not progress, so it
@@ -466,12 +553,19 @@ class AgentLoop:
                     "no_progress_rounds": no_progress_rounds,
                 },
             )
+            self._checkpoint(state)
 
         state.status = AgentStatus.MAX_STEPS
         state.final_answer = None
         _sync_verification_state(state, verification, no_progress_rounds)
         self._record_incomplete(state, verification)
         return state
+
+    def _checkpoint(self, state: AgentState) -> None:
+        """Persist a completed local step without making checkpointing mandatory."""
+
+        if self._state_checkpoint is not None:
+            self._state_checkpoint(state)
 
     def _record_incomplete(
         self,
@@ -502,7 +596,7 @@ class AgentLoop:
             try:
                 return self._model_client.create_response(request)
             except ModelCommunicationError as error:
-                retryable = isinstance(error, _RETRYABLE_MODEL_ERRORS)
+                retryable = _is_retryable_model_error(error)
                 will_retry = retryable and attempt < max_attempts
                 self._record_trace(
                     "model_error",
@@ -538,6 +632,7 @@ class AgentLoop:
                     },
                 )
                 raise
+
 
     def _record_trace(
         self,
@@ -660,6 +755,13 @@ def _final_verification_hint(tracker: VerificationTracker) -> str:
 
 
 def _patch_failure_hint(observation) -> str:
+    if _has_malformed_arguments(observation):
+        return (
+            "The apply_patch function arguments were malformed JSON, so the patch "
+            "engine did not run and no files changed. Do not repeat the same tool "
+            "payload. For a small file that has already been read in full, use "
+            "write_file as the explicit fallback, then verify it."
+        )
     reason = "unknown patch validation failure"
     if isinstance(observation.content, Mapping):
         value = observation.content.get("failure_reason")
@@ -674,6 +776,12 @@ def _patch_failure_hint(observation) -> str:
     )
 
 
+def _has_malformed_arguments(observation) -> bool:
+    return isinstance(observation.content, str) and observation.content.startswith(
+        "Invalid JSON arguments:"
+    )
+
+
 def _context_usage_payload(usage) -> dict[str, object]:
     return {
         "input_characters": usage.input_characters,
@@ -681,6 +789,7 @@ def _context_usage_payload(usage) -> dict[str, object]:
         "budget_characters": usage.budget_characters,
         "recent_observations": usage.recent_observations,
         "compacted_observations": usage.compacted_observations,
+        "truncated_items": usage.truncated_items,
     }
 
 
@@ -771,6 +880,8 @@ def _tool_result_payload(call, observation) -> dict[str, object]:
     }
     if isinstance(content, str):
         payload["content_characters"] = len(content)
+        if not observation.success:
+            payload["failure_reason"] = content[:500]
     elif isinstance(content, Mapping):
         payload["result_keys"] = sorted(str(key) for key in content)
         if call.name == "run_command":
@@ -842,6 +953,7 @@ def _record_plan_event(
     if trace is None or plan is None:
         return
     statuses = {item.step_id: item.status.value for item in plan.steps}
+    descriptions = {item.step_id: item.description for item in plan.steps}
     current_step = next(
         (
             item.step_id
@@ -857,6 +969,11 @@ def _record_plan_event(
             "goal": plan.goal,
             "step_statuses": statuses,
             "current_step": current_step,
+            "current_step_description": descriptions.get(current_step),
+            "completed_steps": sum(
+                status == "completed" for status in statuses.values()
+            ),
+            "total_steps": len(plan.steps),
             "success_criteria_count": len(plan.success_criteria),
         },
     )
@@ -902,3 +1019,21 @@ def _parse_arguments(arguments_json: str) -> dict[str, object]:
     except (TypeError, json.JSONDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _is_retryable_model_error(error: ModelCommunicationError) -> bool:
+    """Return whether retrying the exact request is safe and useful.
+
+    Client-side transport failures and rate limits are transient by definition.
+    A provider ``4xx`` normally means the request itself is invalid and must be
+    fixed locally, so repeating it would only consume time and quota. A small
+    allow-list covers common transient HTTP failures reported by compatible
+    Chat Completions providers.
+    """
+
+    if isinstance(error, _RETRYABLE_MODEL_ERRORS):
+        return True
+    return (
+        isinstance(error, ModelAPIError)
+        and error.status_code in _RETRYABLE_API_STATUS_CODES
+    )

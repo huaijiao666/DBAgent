@@ -61,14 +61,26 @@ def create_readonly_registry(workspace_root: Path) -> ToolRegistry:
                 schema=FunctionTool(
                     name="read_file",
                     description=(
-                        "Read a UTF-8 text file inside the workspace with line numbers."
+                        "Read a UTF-8 text file inside the workspace with line numbers. "
+                        "For a large file, request an inclusive start_line/end_line range "
+                        "instead of rereading the entire file."
                     ),
                     parameters=object_schema(
                         {
                             "path": {
                                 "type": "string",
                                 "description": "Workspace-relative file path.",
-                            }
+                            },
+                            "start_line": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "Optional inclusive first line (default: 1).",
+                            },
+                            "end_line": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "Optional inclusive last line (default: file end).",
+                            },
                         },
                         required=["path"],
                     ),
@@ -135,9 +147,20 @@ def _read_file(workspace: Workspace, arguments: Mapping[str, Any]) -> str:
     if not path.is_file():
         raise ValueError("path is not a file")
     text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    if not lines:
+        return "[empty file]"
+    start_line = _optional_positive_integer(arguments, "start_line", default=1)
+    end_line = _optional_positive_integer(arguments, "end_line", default=len(lines))
+    if end_line < start_line:
+        raise ValueError("end_line must be greater than or equal to start_line")
+    if start_line > len(lines):
+        return f"[no lines in requested range; file has {len(lines)} lines]"
     numbered = "\n".join(
         f"{line_number}: {line}"
-        for line_number, line in enumerate(text.splitlines(), start=1)
+        for line_number, line in enumerate(
+            lines[start_line - 1 : end_line], start=start_line
+        )
     )
     if not numbered:
         return "[empty file]"
@@ -147,6 +170,15 @@ def _read_file(workspace: Workspace, arguments: Mapping[str, Any]) -> str:
             + f"\n[truncated after {_MAX_READ_CHARACTERS} characters]"
         )
     return numbered
+
+
+def _optional_positive_integer(
+    arguments: Mapping[str, Any], name: str, *, default: int
+) -> int:
+    value = arguments.get(name, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
 
 
 def _search_text(workspace: Workspace, arguments: Mapping[str, Any]) -> str:

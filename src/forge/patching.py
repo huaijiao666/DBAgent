@@ -256,10 +256,28 @@ def _line_sequence(value: object, name: str) -> list[str]:
         raise PatchError(f"{name} must be an array of strings")
     if any(not isinstance(line, str) for line in value):
         raise PatchError(f"{name} must be an array of strings")
-    lines = list(value)
-    if any("\n" in line or "\r" in line for line in lines):
-        raise PatchError(f"{name} entries must not contain line endings")
-    return lines
+    return [_normalize_model_line(line, name) for line in value]
+
+
+def _normalize_model_line(line: str, name: str) -> str:
+    """Accept one accidental transport line ending, never embedded newlines.
+
+    The patch protocol is line-oriented, so a provider that serializes an
+    individual array entry as ``"return value\\n"`` has not supplied a
+    different logical line.  Normalizing exactly one terminal CRLF/LF/CR makes
+    native function-calling adapters more tolerant without turning this into a
+    free-form diff parser.  A newline anywhere else remains invalid: it would
+    make one array entry represent multiple patch lines and weaken exact-context
+    matching.
+    """
+
+    if line.endswith("\r\n"):
+        line = line[:-2]
+    elif line.endswith(("\n", "\r")):
+        line = line[:-1]
+    if "\n" in line or "\r" in line:
+        raise PatchError(f"{name} entries must not contain embedded line endings")
+    return line
 
 
 def _required_string(value: Mapping[str, Any], name: str) -> str:

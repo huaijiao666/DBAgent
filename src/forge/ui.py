@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 import sys
+import textwrap
 import time
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -48,6 +50,8 @@ class TerminalUI:
         self._model = ""
         self._max_steps = 0
         self._mode = "auto"
+        self._session_id = ""
+        self._session_state = "new"
 
     def session_start(
         self,
@@ -56,23 +60,30 @@ class TerminalUI:
         model: str,
         api_mode: str,
         mode: str = "auto",
+        session_id: str = "",
+        session_state: str = "new",
         launch_directory: Path | None = None,
     ) -> None:
         """Print the persistent DBA session banner."""
 
         self._started = time.monotonic()
+        self._session_id = session_id
+        self._session_state = session_state
         self._write("")
-        self._write(self._paint("+-- DBA interactive session " + "-" * 46 + "+", "blue"))
+        self._write(self._paint("+-- DBAgent " + "-" * 65 + "+", "blue"))
+        self._write("| Local coding agent | repository-aware | self-verifying".ljust(77) + "|")
         self._write(f"| Workspace {_truncate(str(workspace), 70):<70} |")
         self._write(f"| Model     {_truncate(model, 70):<70} |")
         self._write(f"| API mode  {_truncate(api_mode, 70):<70} |")
         self._write(f"| Task mode {_truncate(mode, 70):<70} |")
+        session_label = f"{session_id or 'not saved yet'} [{session_state}]"
+        self._write(f"| Session   {_truncate(session_label, 70):<70} |")
         if launch_directory is not None and launch_directory != workspace:
             self._write(
                 f"| Started   {_truncate(str(launch_directory), 70):<70} |"
             )
             self._write("| Project root was detected automatically.                              |")
-        self._write("| Type /help for commands; /exit to leave the session.                 |")
+        self._write("| /help commands | /sessions history | /status current state           |")
         self._write(self._paint("+" + "-" * 76 + "+", "blue"))
         self._write("")
 
@@ -86,10 +97,16 @@ class TerminalUI:
 
         self._mode = mode
 
+    def set_session_id(self, session_id: str, *, state: str = "active") -> None:
+        """Update the active session shown by status-oriented UI."""
+
+        self._session_id = session_id
+        self._session_state = state
+
     def info(self, message: str) -> None:
         """Render a non-error status message."""
 
-        self._write(self._paint("INFO  ", "muted") + _truncate(message, 96))
+        self._write_wrapped("INFO  ", message, tone="muted")
 
     def assistant(self, message: str) -> None:
         """Render the assistant's final response for one user turn."""
@@ -102,19 +119,43 @@ class TerminalUI:
         """Render the commands supported by the interactive session."""
 
         self._write("Commands:")
-        self._write("  /model [NAME]  show or change the model for the next turn")
+        self._write("  /models        show model aliases and provider routing")
+        self._write("  /model [NAME]  show aliases or change the model for the next turn")
+        self._write("  /reasoning [LEVEL]  show or set reasoning effort for the next turn")
         self._write("  /mode [auto|ask|code]  show or change task authority")
-        self._write("  /status        show session and latest task status")
+        self._write("  /status        show session, context, and latest task status")
         self._write("  /plan          show the latest retained task plan")
-        self._write("  /resume        restore the latest session saved in this workspace")
-        self._write("  /clear         clear local conversation history")
+        self._write("  /sessions      list resumable sessions in this workspace")
+        self._write("  /resume <ID>   restore a specific session (/resume latest also works)")
+        self._write("  /new           start a new conversation and keep saved sessions")
+        self._write("  /clear         delete only the current saved conversation")
         self._write("  /help          show this help")
         self._write("  /exit          leave DBA")
+
+    def render_model_options(self, presets: Sequence[Any], *, current_model: str) -> None:
+        """Render short aliases without disclosing any provider credentials."""
+
+        self._write("")
+        self._write(self._paint("Model options", "magenta"))
+        self._write("  Alias              Model                 Provider     Description")
+        for preset in presets:
+            marker = ">" if getattr(preset, "model", "") == current_model else " "
+            self._write(
+                f" {marker} {str(getattr(preset, 'alias', '?')):<18} "
+                f"{str(getattr(preset, 'model', '?')):<21} "
+                f"{str(getattr(preset, 'provider', '?')):<12} "
+                f"{_truncate(str(getattr(preset, 'label', '')), 35)}"
+            )
 
     def goodbye(self) -> None:
         """Render the session exit message."""
 
-        self._write(self._paint("Session closed. Local conversation discarded.", "muted"))
+        self._write(
+            self._paint(
+                "Session closed. Workspace checkpoints remain available via /resume.",
+                "muted",
+            )
+        )
 
     def start(
         self,
@@ -166,10 +207,18 @@ class TerminalUI:
             detail = "AGENT  " + _truncate(str(payload.get("text", "")), 90)
         elif event == "model_request":
             usage = payload.get("context_usage", {})
+            approximate_tokens = usage.get("approximate_tokens", "?")
+            budget_characters = usage.get("budget_characters")
+            budget_tokens = (
+                (int(budget_characters) + 3) // 4
+                if isinstance(budget_characters, int)
+                else "?"
+            )
             detail = (
-                "MODEL request  "
-                f"context={usage.get('approximate_tokens', '?')}~tok  "
-                f"tools={len(payload.get('tools', []))}"
+                "分析中  "
+                f"context={approximate_tokens}/{budget_tokens}~tok  "
+                f"recent={usage.get('recent_observations', 0)}  "
+                f"compact={usage.get('compacted_observations', 0)}"
             )
         elif event == "model_response":
             usage = payload.get("usage") or {}
@@ -179,9 +228,14 @@ class TerminalUI:
                 else ""
             )
             detail = (
-                "MODEL response  "
+                "模型响应  "
                 f"status={payload.get('status')}  "
                 f"calls={payload.get('function_call_count')}{tokens}"
+            )
+        elif event == "model_wait":
+            detail = (
+                "仍在等待模型  "
+                f"provider request running for {payload.get('waiting_seconds', '?')}s"
             )
         elif event == "model_error":
             action = "retrying" if payload.get("will_retry") else "stopped"
@@ -193,10 +247,20 @@ class TerminalUI:
             )
         elif event == "tool_start":
             detail = _human_tool_start(payload)
+            if payload.get("plan_step"):
+                detail = f"[{payload['plan_step']}]  {detail}"
         elif event == "tool_result":
             detail = _human_tool_result(payload)
             if payload.get("return_code") is not None:
                 detail += f"  rc={payload['return_code']}"
+            if payload.get("content_characters") is not None:
+                detail += f"  {_human_size(int(payload['content_characters']))}"
+            if payload.get("stdout_characters") is not None:
+                detail += f"  out={_human_size(int(payload['stdout_characters']))}"
+            if payload.get("timed_out"):
+                detail += "  TIMEOUT"
+            if payload.get("stdout_truncated") or payload.get("stderr_truncated"):
+                detail += "  TRUNCATED"
             if payload.get("changed_files"):
                 detail += f"  files={payload['changed_files']}"
             elif payload.get("path"):
@@ -213,10 +277,19 @@ class TerminalUI:
                 f"hunks={payload.get('hunks_applied', 0)}"
             )
         elif event == "plan_updated":
+            completed = payload.get("completed_steps", 0)
+            total = payload.get("total_steps", "?")
             detail = (
-                "PLAN  "
-                f"current={payload.get('current_step') or 'done'}  "
-                f"{_compact_statuses(payload.get('step_statuses', {}))}"
+                f"计划 {completed}/{total}  "
+                f"当前: {_truncate(str(payload.get('current_step_description') or payload.get('current_step') or 'done'), 56)}"
+            )
+        elif event == "context_compacted":
+            detail = (
+                "上下文摘要  "
+                f"older={payload.get('compacted_observations', 0)}  "
+                f"recent={payload.get('recent_observations', 0)}  "
+                f"truncated={payload.get('truncated_items', 0)}  "
+                f"context={payload.get('approximate_tokens', '?')}~tok"
             )
         elif event == "verification":
             status = payload.get("status")
@@ -287,10 +360,72 @@ class TerminalUI:
             )
             self._write(f"    {marker} {step.step_id}: {step.description} [{status}]")
 
+    def render_sessions(
+        self,
+        sessions: Sequence[Any],
+        *,
+        active_session_id: str = "",
+    ) -> None:
+        """Render a stable, copyable list for ``/resume <ID>``."""
+
+        self._write("")
+        self._write(self._paint("Saved sessions", "magenta"))
+        if not sessions:
+            self._write("  No saved sessions in this workspace.")
+            return
+        self._write("  ID                       Updated              Turns  Verify     Title")
+        for item in sessions:
+            session_id = str(getattr(item, "session_id", "?"))
+            active = ">" if session_id == active_session_id else " "
+            updated = _display_timestamp(str(getattr(item, "updated_at", "")))
+            turns = str(getattr(item, "turns", 0))
+            status = str(getattr(item, "status", "unknown"))
+            title = _truncate(str(getattr(item, "title", "Untitled")), 42)
+            self._write(
+                f" {active} {session_id:<24} {updated:<19} {turns:>5}  "
+                f"{_truncate(status, 10):<10} {title}"
+            )
+
+    def render_resume_summary(
+        self,
+        *,
+        session_id: str,
+        title: str,
+        turns: int,
+        verification: str,
+        observation_count: int,
+        has_plan: bool,
+        checkpoint_state: str,
+    ) -> None:
+        """Show exactly which persisted context became active after resume."""
+
+        self._write("")
+        self._write(self._paint("+-- Resumed context " + "-" * 56 + "+", "green"))
+        self._write(f"| Session       {_truncate(session_id, 60):<60} |")
+        self._write(f"| Title         {_truncate(title, 60):<60} |")
+        self._write(f"| Chat turns    {turns:<60} |")
+        self._write(f"| Verification  {_truncate(verification, 60):<60} |")
+        self._write(f"| Observations  {observation_count:<60} |")
+        self._write(f"| Plan restored {str(has_plan).lower():<60} |")
+        self._write(f"| Checkpoint    {_truncate(checkpoint_state, 60):<60} |")
+        self._write(self._paint("+" + "-" * 76 + "+", "green"))
+
     def error(self, message: str) -> None:
         """Render an error consistently with other dashboard output."""
 
-        self._write(self._paint(f"ERROR  {_truncate(message, 96)}", "red"))
+        self._write_wrapped("ERROR ", message, tone="red")
+
+    def _write_wrapped(self, label: str, message: str, *, tone: str) -> None:
+        lines = textwrap.wrap(
+            message,
+            width=96,
+            break_long_words=False,
+            break_on_hyphens=False,
+        ) or [""]
+        self._write(self._paint(label, tone) + lines[0])
+        continuation = " " * len(label)
+        for line in lines[1:]:
+            self._write(continuation + line)
 
     def _write(self, text: str) -> None:
         safe_print(text, stream=self.stream, flush=True)
@@ -306,11 +441,13 @@ _EVENT_STYLE = {
     "assistant_update": ("·", "blue"),
     "model_request": (".", "blue"),
     "model_response": ("<-", "blue"),
+    "model_wait": ("·", "muted"),
     "model_error": ("!!", "red"),
     "tool_start": ("->", "yellow"),
     "tool_result": ("OK", "green"),
     "patch_applied": ("#", "magenta"),
     "plan_updated": ("*", "magenta"),
+    "context_compacted": ("~", "magenta"),
     "verification": ("OK", "green"),
     "recovery": ("~", "yellow"),
     "step_summary": ("=", "muted"),
@@ -380,6 +517,21 @@ def _truncate(value: str, limit: int) -> str:
     if limit <= 3:
         return value[:limit]
     return value[: limit - 3] + "..."
+
+
+def _human_size(characters: int) -> str:
+    if characters < 1_000:
+        return f"{characters} chars"
+    return f"{characters / 1_000:.1f}k chars"
+
+
+def _display_timestamp(value: str) -> str:
+    if not value:
+        return "unknown"
+    try:
+        return datetime.fromisoformat(value).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return value[:19].replace("T", " ")
 
 
 def _changed_files(observations: Sequence[Any]) -> list[str]:

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from forge.agent import AgentStatus, PlanStep, PlanStepStatus, TaskPlan
 from forge.agent.verification import VerificationStatus
 from forge.config import ForgeConfig
+from forge.llm import ModelCommunicationError
 from forge.repl import ForgeRepl
 from forge.tools import ToolObservation
 
@@ -24,6 +25,7 @@ class _FakeLoop:
         initial_plan=None,
         verification_required=False,
         trace,
+        state_checkpoint=None,
     ) -> None:
         self.max_steps = max_steps
         self.mode = mode
@@ -122,11 +124,11 @@ def test_repl_keeps_local_history_and_handles_commands(
         "gpt-5.6-sol",
     ]
     output = stream.getvalue()
-    assert "DBA interactive session" in output
+    assert "DBAgent" in output
     assert "Model changed to gpt-5.6-sol" in output
     assert "ASSISTANT" in output
     assert "Current plan:" in output
-    assert "Local and saved conversation history cleared." in output
+    assert "Current conversation cleared. Other saved sessions were kept." in output
     assert "Session closed" in output
 
 
@@ -156,6 +158,28 @@ def test_repl_resumes_only_an_explicit_unfinished_continuation(
     assert _FakeLoop.initial_plans[1].goal == "Keep testing"
 
 
+def test_repl_auto_mode_continuation_restores_code_authority(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = ForgeConfig(openai_api_key="fake-token")
+    monkeypatch.setattr("forge.repl.load_repl_config", lambda _path: config)
+    monkeypatch.setattr("forge.repl.AgentLoop", _FakeLoop)
+    _FakeLoop.calls = []
+    _FakeLoop.initial_plans = []
+    inputs = iter(["implement a feature", "continue this task", "/exit"])
+    repl = ForgeRepl(
+        workspace=tmp_path,
+        input_function=lambda _prompt: next(inputs),
+        stream=io.StringIO(),
+        model_factory=lambda _config: object(),
+        registry_factory=lambda _workspace: object(),
+    )
+
+    assert repl.run() == 0
+    assert _FakeLoop.initial_plans[1] is not None
+    assert _FakeLoop.initial_plans[1].goal == "Keep testing"
+
+
 def test_repl_resume_restores_latest_workspace_session_across_processes(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -174,14 +198,15 @@ def test_repl_resume_restores_latest_workspace_session_across_processes(
         registry_factory=lambda _workspace: object(),
     )
     assert first.run() == 0
-    assert (tmp_path / ".forge" / "session.json").is_file()
+    saved = first._session_store.list_sessions()
+    assert len(saved) == 1
 
     output = io.StringIO()
     second = ForgeRepl(
         workspace=tmp_path,
         mode="code",
         input_function=lambda _prompt, values=iter(
-            ["/resume", "continue this task", "/exit"]
+            ["/resume latest", "continue this task", "/exit"]
         ): next(values),
         stream=output,
         model_factory=lambda _config: object(),
@@ -191,7 +216,7 @@ def test_repl_resume_restores_latest_workspace_session_across_processes(
 
     assert "[assistant]\nanswer 1" in _FakeLoop.calls[1][0]
     assert _FakeLoop.initial_plans[1] is not None
-    assert "Resumed workspace session" in output.getvalue()
+    assert "Resumed context" in output.getvalue()
 
 
 def test_repl_help_and_unknown_command_do_not_call_model(
@@ -221,8 +246,61 @@ def test_repl_help_and_unknown_command_do_not_call_model(
     output = stream.getvalue()
     assert "/model [NAME]" in output
     assert "/resume" in output
+    assert "/sessions" in output
     assert "Unknown command '/not-a-command'" in output
     assert not _FakeLoop.calls
+
+
+def test_repl_lists_and_resumes_a_specific_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = ForgeConfig(openai_api_key="fake-token")
+    monkeypatch.setattr("forge.repl.load_repl_config", lambda _path: config)
+    monkeypatch.setattr("forge.repl.AgentLoop", _FakeLoop)
+    _FakeLoop.calls = []
+    _FakeLoop.initial_plans = []
+
+    first = ForgeRepl(
+        workspace=tmp_path,
+        mode="code",
+        input_function=lambda _prompt, values=iter(["first task", "/exit"]): next(values),
+        stream=io.StringIO(),
+        model_factory=lambda _config: object(),
+        registry_factory=lambda _workspace: object(),
+    )
+    assert first.run() == 0
+    first_id = first._session_id
+
+    second = ForgeRepl(
+        workspace=tmp_path,
+        mode="code",
+        input_function=lambda _prompt, values=iter(["second task", "/exit"]): next(values),
+        stream=io.StringIO(),
+        model_factory=lambda _config: object(),
+        registry_factory=lambda _workspace: object(),
+    )
+    assert second.run() == 0
+    assert second._session_id != first_id
+
+    output = io.StringIO()
+    third = ForgeRepl(
+        workspace=tmp_path,
+        mode="code",
+        input_function=lambda _prompt, values=iter(
+            ["/sessions", "/resume", f"/resume {first_id}", "continue this task", "/exit"]
+        ): next(values),
+        stream=output,
+        model_factory=lambda _config: object(),
+        registry_factory=lambda _workspace: object(),
+    )
+    assert third.run() == 0
+
+    rendered = output.getvalue()
+    assert first_id in rendered
+    assert "Use /resume <ID>" in rendered
+    assert "first task" in rendered
+    assert "Plan restored true" in rendered
+    assert "[assistant]\nanswer 1" in _FakeLoop.calls[-1][0]
 
 
 def test_repl_mode_command_is_sticky_and_visible(
@@ -306,3 +384,111 @@ def test_repl_applies_explicit_model_and_reasoning_overrides(
     assert created_configs[0].model == "gpt-5.6-sol"
     assert created_configs[0].reasoning_effort == "medium"
     assert created_configs[0].base_url == config.base_url
+
+
+def test_repl_switches_presets_and_reasoning_without_persisting_a_key(
+    tmp_path: Path, monkeypatch
+) -> None:
+    key_file = tmp_path / "external-api-key.txt"
+    key_file.write_text("deepseek-test-secret\n", encoding="utf-8")
+    stream = io.StringIO()
+    config = ForgeConfig(
+        openai_api_key="configured-provider-secret",
+        model="gpt-5.6-luna",
+        reasoning_effort="medium",
+        base_url="https://provider.example/v1",
+        api_mode="chat_completions",
+    )
+    created: list[ForgeConfig] = []
+    monkeypatch.setattr("forge.repl.load_repl_config", lambda _path: config)
+    inputs = iter(
+        [
+            "/models",
+            "/model deepseek-flash",
+            "/reasoning high",
+            "/status",
+            "/model terra",
+            "/exit",
+        ]
+    )
+    repl = ForgeRepl(
+        workspace=tmp_path,
+        input_function=lambda _prompt: next(inputs),
+        stream=stream,
+        model_factory=lambda value: created.append(value) or object(),
+        registry_factory=lambda _workspace: object(),
+        deepseek_key_file=key_file,
+    )
+
+    assert repl.run() == 0
+    assert [item.model for item in created] == [
+        "gpt-5.6-luna",
+        "deepseek-v4-flash",
+        "deepseek-v4-flash",
+        "gpt-5.6-terra",
+    ]
+    assert created[1].base_url == "https://api.deepseek.com"
+    assert created[1].provider == "deepseek"
+    assert created[2].reasoning_effort == "high"
+    assert created[3].openai_api_key == "configured-provider-secret"
+    output = stream.getvalue()
+    assert "Model options" in output
+    assert "Reasoning effort changed to high" in output
+    assert "deepseek-test-secret" not in output
+    assert "configured-provider-secret" not in output
+
+
+def test_repl_persists_completed_steps_when_a_model_request_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class CheckpointThenFail:
+        def __init__(self, _model, _registry, *, state_checkpoint=None, **_kwargs) -> None:
+            self._checkpoint = state_checkpoint
+
+        def run(self, _prompt, *, workspace: Path, launch_directory: Path | None = None):
+            assert self._checkpoint is not None
+            plan = TaskPlan(
+                goal="Implement feature",
+                success_criteria=("tests pass",),
+                steps=(
+                    PlanStep("implement", "Write code", PlanStepStatus.IN_PROGRESS),
+                ),
+            )
+            self._checkpoint(
+                SimpleNamespace(
+                    plan=plan,
+                    verification_status=VerificationStatus.NOT_RUN,
+                    latest_verification=None,
+                    recovery_hints=[],
+                    observations=[
+                        ToolObservation(
+                            "call_create",
+                            "create_file",
+                            True,
+                            {"path": "feature.py", "changed_files": ["feature.py"]},
+                        )
+                    ],
+                )
+            )
+            raise ModelCommunicationError("provider stopped")
+
+    config = ForgeConfig(openai_api_key="fake-token")
+    monkeypatch.setattr("forge.repl.load_repl_config", lambda _path: config)
+    monkeypatch.setattr("forge.repl.AgentLoop", CheckpointThenFail)
+    inputs = iter(["implement the feature", "/exit"])
+    repl = ForgeRepl(
+        workspace=tmp_path,
+        mode="code",
+        input_function=lambda _prompt: next(inputs),
+        stream=io.StringIO(),
+        model_factory=lambda _config: object(),
+        registry_factory=lambda _workspace: object(),
+    )
+
+    assert repl.run() == 0
+    saved = repl._session_store.load(repl._session_id)
+
+    assert saved is not None
+    assert saved["run_state"] == "interrupted"
+    assert saved["session_context"]["plan"]["goal"] == "Implement feature"
+    assert saved["session_context"]["observations"][0]["tool_name"] == "create_file"

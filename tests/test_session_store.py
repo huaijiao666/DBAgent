@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from forge.session_store import SessionStore
 
 
@@ -37,3 +39,34 @@ def test_session_store_clear_removes_only_the_saved_session(tmp_path: Path) -> N
 
     assert store.exists is False
     assert unrelated.read_text(encoding="utf-8") == "trace\n"
+
+
+def test_session_store_lists_and_loads_specific_sessions(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path)
+    first_id = store.save(
+        {
+            "title": "Fix parser",
+            "conversation": [{"role": "user", "content": "Fix parser"}],
+            "session_context": {"verification_status": "failed"},
+        }
+    )
+    second_id = store.save(
+        {
+            "title": "Add CLI flag",
+            "conversation": [{"role": "user", "content": "Add CLI flag"}],
+            "session_context": {"verification_status": "passed"},
+        }
+    )
+
+    summaries = store.list_sessions()
+
+    assert {item.session_id for item in summaries} == {first_id, second_id}
+    assert store.load(first_id)["title"] == "Fix parser"
+    assert store.load(second_id)["session_context"]["verification_status"] == "passed"
+
+
+def test_session_store_rejects_session_id_path_traversal(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path)
+
+    with pytest.raises(ValueError, match="invalid DBA session id"):
+        store.load("../../outside")

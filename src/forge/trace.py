@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
@@ -43,12 +44,18 @@ class TraceRecorder:
         console: bool = False,
         stream: TextIO | None = None,
         renderer: ConsoleRenderer | None = None,
+        progress_interval_seconds: float = 15.0,
     ) -> None:
+        if progress_interval_seconds < 0:
+            raise ValueError("progress_interval_seconds must not be negative")
         self.path = path
         self.workspace = workspace.resolve() if workspace is not None else None
         self.console = console
         self._stream = stream or sys.stderr
         self._renderer = renderer
+        self._progress_interval_seconds = progress_interval_seconds
+        self._waiting_stop = threading.Event()
+        self._waiting_thread: threading.Thread | None = None
         self._started = time.monotonic()
         self._file = self._open(path)
 
@@ -61,6 +68,10 @@ class TraceRecorder:
     ) -> None:
         """Append one flushed JSONL event and render its concise console line."""
 
+        if event in {"model_response", "final"} or (
+            event == "model_error" and not (payload or {}).get("will_retry")
+        ):
+            self._stop_waiting()
         elapsed_ms = round((time.monotonic() - self._started) * 1000)
         item = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -79,6 +90,8 @@ class TraceRecorder:
                 else _format_console_line(item)
             )
             safe_print(line, stream=self._stream, flush=True)
+            if event == "model_request":
+                self._start_waiting(step)
 
     def publish(
         self,
@@ -111,6 +124,7 @@ class TraceRecorder:
         safe_print(line, stream=self._stream, flush=True)
 
     def close(self) -> None:
+        self._stop_waiting()
         if not self._file.closed:
             self._file.close()
 
@@ -125,6 +139,47 @@ class TraceRecorder:
         path.parent.mkdir(parents=True, exist_ok=True)
         # Preserve earlier evidence when DBA restarts or resumes a workspace.
         return path.open("a", encoding="utf-8", newline="\n")
+
+    def _start_waiting(self, step: int) -> None:
+        self._stop_waiting()
+        if self._progress_interval_seconds == 0:
+            return
+        stop_event = threading.Event()
+        self._waiting_stop = stop_event
+        waiting_started = time.monotonic()
+
+        def report() -> None:
+            delay = self._progress_interval_seconds
+            while not stop_event.wait(delay):
+                waiting_seconds = round(time.monotonic() - waiting_started)
+                item = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "elapsed_ms": round((time.monotonic() - self._started) * 1000),
+                    "step": step,
+                    "event": "model_wait",
+                    "payload": {"waiting_seconds": waiting_seconds},
+                }
+                line = (
+                    self._renderer.render_event(item)
+                    if self._renderer is not None
+                    else _format_console_line(item)
+                )
+                safe_print(line, stream=self._stream, flush=True)
+                delay = min(delay * 2, 60.0)
+
+        self._waiting_thread = threading.Thread(
+            target=report,
+            name="dba-model-wait",
+            daemon=True,
+        )
+        self._waiting_thread.start()
+
+    def _stop_waiting(self) -> None:
+        self._waiting_stop.set()
+        thread = self._waiting_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=0.2)
+        self._waiting_thread = None
 
 
 def _sanitize(value: Any, *, key: str = "") -> Any:
@@ -173,6 +228,18 @@ def _format_console_line(item: Mapping[str, Any]) -> str:
             f"[{elapsed}] step {step} MODEL response: "
             f"status={payload.get('status')}, calls={payload.get('function_call_count')}"
             f"{token_text}"
+        )
+    if event == "model_wait":
+        return (
+            f"[{elapsed}] step {step} MODEL waiting: "
+            f"{payload.get('waiting_seconds', '?')}s"
+        )
+    if event == "context_compacted":
+        return (
+            f"[{elapsed}] step {step} CONTEXT summarized: "
+            f"older={payload.get('compacted_observations', 0)}, "
+            f"recent={payload.get('recent_observations', 0)}, "
+            f"truncated={payload.get('truncated_items', 0)}"
         )
     if event == "tool_start":
         return f"[{elapsed}] step {step} TOOL -> {payload.get('tool_name')}"

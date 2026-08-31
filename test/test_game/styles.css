@@ -1,0 +1,259 @@
+/* ======================================================================
+   Snake — stylesheet
+   ====================================================================== */
+
+:root {
+  --bg: #0d1117;
+  --panel: #161b22;
+  --panel-2: #1c232d;
+  --line: #2d333b;
+  --text: #c9d1d9;
+  --text-dim: #8b949e;
+  --accent: #3fb950;
+  --accent-dark: #238636;
+  --danger: #f85149;
+  --warn: #d29922;
+  --grid: #21262d;
+  --cell: #30363d;
+  --apple: #f85149;
+  --head: #3fb950;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 16px;
+}
+
+.wrap {
+  width: 100%;
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.title {
+  text-align: center;
+  margin: 0;
+  font-size: 26px;
+  letter-spacing: 1px;
+  color: var(--accent);
+  text-transform: uppercase;
+}
+
+/* ------------------------------- HUD -------------------------------- */
+
+.hud {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  align-items: stretch;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.stat .label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-dim);
+}
+
+.stat .value {
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.status-pill-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pill {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+}
+
+.pill.running { color: var(--accent); border-color: var(--accent-dark); }
+.pill.paused  { color: var(--warn);   border-color: var(--warn); }
+.pill.over    { color: var(--danger); border-color: var(--danger); }
+.pill.won     { color: var(--accent); border-color: var(--accent); }
+
+/* ------------------------------ board ------------------------------ */
+
+.board-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border: 2px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--panel-2);
+}
+
+#game-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+
+/* ----------------------------- overlay ------------------------------ */
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: rgba(13, 17, 23, 0.86);
+  text-align: center;
+  padding: 20px;
+}
+
+.overlay.hidden {
+  display: none;
+}
+
+.overlay h2 {
+  margin: 0;
+  font-size: 26px;
+  color: var(--text);
+}
+
+.overlay p {
+  margin: 4px 0;
+  color: var(--text-dim);
+  font-size: 14px;
+  max-width: 360px;
+  line-height: 1.4;
+}
+
+#high-score-badge {
+  color: var(--warn);
+  font-weight: 700;
+}
+
+/* ------------------------------ buttons ----------------------------- */
+
+.btn {
+  appearance: none;
+  border: none;
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: 600;
+  padding: 10px 22px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #0d1117;
+  transition: filter 0.15s ease;
+}
+
+.btn:hover {
+  filter: brightness(1.1);
+}
+
+.btn:active {
+  transform: translateY(1px);
+}
+
+.btn.ghost {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+}
+
+/* ----------------------------- controls ----------------------------- */
+
+.controls {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: center;
+}
+
+.dpad {
+  display: grid;
+  grid-template-columns: repeat(3, 52px);
+  grid-template-rows: repeat(3, 52px);
+  gap: 6px;
+}
+
+.dpad button {
+  appearance: none;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 20px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.dpad button:hover {
+  background: var(--panel-2);
+}
+
+.dpad button:active {
+  background: var(--line);
+}
+
+.dpad button[data-dir="up"]    { grid-area: 1 / 2; }
+.dpad button[data-dir="left"]  { grid-area: 2 / 1; }
+.dpad button[data-dir="down"]  { grid-area: 3 / 2; }
+.dpad button[data-dir="right"] { grid-area: 2 / 3; }
+
+.buttons {
+  display: flex;
+  gap: 10px;
+}
+
+.status-text {
+  margin: 0;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-dim);
+  min-height: 18px;
+}
+
+.hidden {
+  display: none !important;
+}

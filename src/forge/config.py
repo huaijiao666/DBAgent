@@ -11,6 +11,7 @@ DEFAULT_MODEL = "gpt-5.6-sol"
 DEFAULT_REASONING_EFFORT = "medium"
 DEFAULT_API_MODE = "responses"
 SUPPORTED_API_MODES = frozenset({"responses", "chat_completions"})
+SUPPORTED_PROVIDERS = frozenset({"configured", "deepseek"})
 SUPPORTED_REASONING_EFFORTS = frozenset(
     {"none", "low", "medium", "high", "xhigh", "max"}
 )
@@ -29,6 +30,7 @@ class ForgeConfig:
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
     base_url: str | None = None
     api_mode: str = DEFAULT_API_MODE
+    provider: str = "configured"
 
     @classmethod
     def from_env(cls, environment: Mapping[str, str] | None = None) -> ForgeConfig:
@@ -47,6 +49,7 @@ class ForgeConfig:
         ).strip().lower()
         base_url = source.get("FORGE_BASE_URL", "").strip() or None
         api_mode = source.get("FORGE_API_MODE", DEFAULT_API_MODE).strip().lower()
+        provider = source.get("FORGE_PROVIDER", "configured").strip().lower()
 
         if not model:
             raise ConfigurationError("FORGE_MODEL must not be empty")
@@ -59,6 +62,13 @@ class ForgeConfig:
             allowed = ", ".join(sorted(SUPPORTED_API_MODES))
             raise ConfigurationError(
                 "FORGE_API_MODE must be one of: " + allowed
+            )
+        if provider not in SUPPORTED_PROVIDERS:
+            allowed = ", ".join(sorted(SUPPORTED_PROVIDERS))
+            raise ConfigurationError("FORGE_PROVIDER must be one of: " + allowed)
+        if provider == "deepseek" and api_mode != "chat_completions":
+            raise ConfigurationError(
+                "DeepSeek requires FORGE_API_MODE=chat_completions"
             )
         if base_url is not None:
             parsed_base_url = urlparse(base_url)
@@ -76,4 +86,5 @@ class ForgeConfig:
             reasoning_effort=reasoning_effort,
             base_url=base_url,
             api_mode=api_mode,
+            provider=provider,
         )

@@ -60,11 +60,51 @@ def test_terminal_ui_formats_trace_events_without_ansi() -> None:
         }
     )
 
-    assert "MODEL request" in request
-    assert "context=321~tok" in request
+    assert "分析中" in request
+    assert "context=321/?~tok" in request
     assert "VERIFY" in verification
     assert "status=passed" in verification
     assert "\x1b[" not in request
+
+
+def test_terminal_ui_wraps_important_status_instead_of_truncating() -> None:
+    stream = io.StringIO()
+    ui = TerminalUI(stream=stream, color=False)
+
+    ui.info("session=abc; " + "verification details " * 10)
+
+    output = stream.getvalue()
+    assert "session=abc" in output
+    assert " ".join(output.split()).count("verification details") == 10
+    assert "..." not in output
+
+
+def test_terminal_ui_makes_new_and_resumed_context_explicit(tmp_path: Path) -> None:
+    stream = io.StringIO()
+    ui = TerminalUI(stream=stream, color=False)
+    ui.session_start(
+        workspace=tmp_path,
+        model="model",
+        api_mode="responses",
+        session_id="20260831-120000-abcdef",
+        session_state="new",
+    )
+    ui.render_resume_summary(
+        session_id="20260830-120000-fedcba",
+        title="Fix parser",
+        turns=3,
+        verification="passed",
+        observation_count=5,
+        has_plan=True,
+        checkpoint_state="interrupted",
+    )
+
+    output = stream.getvalue()
+    assert "20260831-120000-abcdef [new]" in output
+    assert "Resumed context" in output
+    assert "20260830-120000-fedcba" in output
+    assert "Plan restored true" in output
+    assert "Checkpoint    interrupted" in output
 
 
 def test_terminal_ui_explains_tool_actions_in_human_terms() -> None:
@@ -128,6 +168,64 @@ def test_terminal_ui_shows_patch_failure_reason() -> None:
 
     assert "失败: 应用补丁" in rendered
     assert "context did not match" in rendered
+
+
+def test_terminal_ui_shows_non_patch_tool_failure_reason() -> None:
+    ui = TerminalUI(stream=io.StringIO(), color=False)
+    ui.start(task="task", workspace=Path("."), model="model", max_steps=3)
+
+    rendered = ui.render_event(
+        {
+            "elapsed_ms": 400,
+            "step": 2,
+            "event": "tool_result",
+            "payload": {
+                "tool_name": "create_file",
+                "success": False,
+                "failure_reason": "FileNotFoundError: parent directory does not exist",
+            },
+        }
+    )
+
+    assert "失败: 创建文件" in rendered
+    assert "parent directory does not exist" in rendered
+
+
+def test_terminal_ui_shows_context_compaction_and_plan_progress() -> None:
+    ui = TerminalUI(stream=io.StringIO(), color=False)
+    ui.start(task="task", workspace=Path("."), model="model", max_steps=8)
+
+    compacted = ui.render_event(
+        {
+            "elapsed_ms": 500,
+            "step": 4,
+            "event": "context_compacted",
+            "payload": {
+                "compacted_observations": 7,
+                "recent_observations": 4,
+                "truncated_items": 2,
+                "approximate_tokens": 8000,
+            },
+        }
+    )
+    plan = ui.render_event(
+        {
+            "elapsed_ms": 600,
+            "step": 4,
+            "event": "plan_updated",
+            "payload": {
+                "completed_steps": 1,
+                "total_steps": 3,
+                "current_step": "implement",
+                "current_step_description": "Implement parser changes",
+            },
+        }
+    )
+
+    assert "上下文摘要" in compacted
+    assert "older=7" in compacted
+    assert "计划 1/3" in plan
+    assert "Implement parser changes" in plan
 
 
 def test_terminal_ui_renders_only_latest_plan_snapshot() -> None:

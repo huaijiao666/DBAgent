@@ -34,13 +34,23 @@ def _sdk(response: SimpleNamespace) -> Mock:
     return sdk
 
 
-def _response(*, content: str, tool_calls=(), finish_reason: str = "stop") -> SimpleNamespace:
+def _response(
+    *,
+    content: str,
+    tool_calls=(),
+    finish_reason: str = "stop",
+    reasoning_content: str | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         id="chat_test",
         model="gpt-5.6-luna",
         choices=[
             SimpleNamespace(
-                message=SimpleNamespace(content=content, tool_calls=list(tool_calls)),
+                message=SimpleNamespace(
+                    content=content,
+                    tool_calls=list(tool_calls),
+                    reasoning_content=reasoning_content,
+                ),
                 finish_reason=finish_reason,
             )
         ],
@@ -114,6 +124,64 @@ def test_responses_items_are_translated_to_chat_messages() -> None:
     assert "must not forward" not in json.dumps(messages)
 
 
+def test_plain_reasoning_is_replayed_with_its_assistant_tool_call() -> None:
+    messages = responses_items_to_chat_messages(
+        [
+            {"type": "reasoning", "content": "Need to inspect README first."},
+            {"role": "assistant", "content": "I will inspect it."},
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "read_file",
+                "arguments": '{"path":"README.md"}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "contents",
+            },
+        ],
+        replay_reasoning_content=True,
+    )
+
+    assert messages == [
+        {
+            "role": "assistant",
+            "content": "I will inspect it.",
+            "reasoning_content": "Need to inspect README first.",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": '{"path":"README.md"}',
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "contents"},
+    ]
+
+
+def test_deepseek_conversion_keeps_non_null_assistant_content_for_tool_calls() -> None:
+    messages = responses_items_to_chat_messages(
+        [
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "read_file",
+                "arguments": '{"path":"README.md"}',
+            },
+            {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+        ],
+        require_assistant_content_for_tool_calls=True,
+    )
+
+    assert messages[0]["content"] == ""
+    assert messages[0]["tool_calls"][0]["function"]["name"] == "read_file"
+
+
 def test_chat_request_uses_nested_function_tools_and_instructions() -> None:
     sdk = _sdk(_response(content="done"))
     client = OpenAIChatCompletionsClient(_config(), sdk_client=sdk)
@@ -153,6 +221,76 @@ def test_chat_request_uses_nested_function_tools_and_instructions() -> None:
     assert "conversation" not in parameters
 
 
+def test_chat_request_uses_provider_thinking_extension_only_when_enabled() -> None:
+    sdk = _sdk(_response(content="done"))
+    config = ForgeConfig(
+        openai_api_key="test-key",
+        model="deepseek-v4-flash",
+        reasoning_effort="high",
+        base_url="https://api.deepseek.com",
+        api_mode="chat_completions",
+        provider="deepseek",
+    )
+
+    OpenAIChatCompletionsClient(config, sdk_client=sdk).create_response(
+        ModelRequest(input="Inspect this repository")
+    )
+
+    parameters = sdk.chat.completions.create.call_args.kwargs
+    assert parameters["reasoning_effort"] == "high"
+    assert parameters["extra_body"] == {"thinking": {"type": "enabled"}}
+
+
+def test_chat_disables_deepseek_thinking_during_executable_tool_turns() -> None:
+    sdk = _sdk(_response(content="done"))
+    config = ForgeConfig(
+        openai_api_key="test-key",
+        model="deepseek-v4-flash",
+        reasoning_effort="high",
+        base_url="https://api.deepseek.com",
+        api_mode="chat_completions",
+        provider="deepseek",
+    )
+    tool = FunctionTool(
+        name="read_file",
+        description="Read one file.",
+        parameters={"type": "object", "properties": {}, "additionalProperties": False},
+    )
+
+    OpenAIChatCompletionsClient(config, sdk_client=sdk).create_response(
+        ModelRequest(input="Inspect", tools=(tool,), tool_choice="auto")
+    )
+
+    parameters = sdk.chat.completions.create.call_args.kwargs
+    assert parameters["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+def test_deepseek_finalization_omits_tools_before_enabling_thinking() -> None:
+    sdk = _sdk(_response(content="done"))
+    config = ForgeConfig(
+        openai_api_key="test-key",
+        model="deepseek-v4-flash",
+        reasoning_effort="high",
+        base_url="https://api.deepseek.com",
+        api_mode="chat_completions",
+        provider="deepseek",
+    )
+    tool = FunctionTool(
+        name="read_file",
+        description="Read one file.",
+        parameters={"type": "object", "properties": {}, "additionalProperties": False},
+    )
+
+    OpenAIChatCompletionsClient(config, sdk_client=sdk).create_response(
+        ModelRequest(input="Finish", tools=(tool,), tool_choice="none")
+    )
+
+    parameters = sdk.chat.completions.create.call_args.kwargs
+    assert parameters["extra_body"] == {"thinking": {"type": "enabled"}}
+    assert "tools" not in parameters
+    assert "tool_choice" not in parameters
+
+
 def test_chat_tool_calls_are_normalized_to_existing_function_call_contract() -> None:
     raw_tool_call = SimpleNamespace(
         id="call_123",
@@ -182,6 +320,81 @@ def test_chat_tool_calls_are_normalized_to_existing_function_call_contract() -> 
     assert result.output_items[-1]["type"] == "function_call"
     assert result.usage is not None
     assert result.usage.total_tokens == 17
+
+
+def test_chat_normalizes_exact_compatibility_arguments_wrapper() -> None:
+    raw_tool_call = SimpleNamespace(
+        id="call_wrapped",
+        type="function",
+        function=SimpleNamespace(
+            name="apply_patch",
+            arguments='{"arguments":{"files":[]}}',
+        ),
+    )
+    sdk = _sdk(
+        _response(content="", tool_calls=(raw_tool_call,), finish_reason="tool_calls")
+    )
+
+    result = OpenAIChatCompletionsClient(_config(), sdk_client=sdk).create_response(
+        ModelRequest(input="Fix it")
+    )
+
+    assert result.function_calls[0].arguments_json == '{"files":[]}'
+
+
+def test_chat_normalizes_reasoning_for_a_later_deepseek_tool_turn() -> None:
+    raw_tool_call = SimpleNamespace(
+        id="call_123",
+        type="function",
+        function=SimpleNamespace(name="read_file", arguments='{"path":"README.md"}'),
+    )
+    sdk = _sdk(
+        _response(
+            content="I will read it.",
+            reasoning_content="The README likely contains the startup command.",
+            tool_calls=(raw_tool_call,),
+            finish_reason="tool_calls",
+        )
+    )
+
+    deepseek_config = ForgeConfig(
+        openai_api_key="test-key",
+        model="deepseek-v4-flash",
+        reasoning_effort="high",
+        base_url="https://api.deepseek.com",
+        api_mode="chat_completions",
+        provider="deepseek",
+    )
+    result = OpenAIChatCompletionsClient(
+        deepseek_config, sdk_client=sdk
+    ).create_response(
+        ModelRequest(input="Read it")
+    )
+
+    assert result.output_items[0] == {
+        "type": "reasoning",
+        "content": "The README likely contains the startup command.",
+    }
+    assert result.output_items[1]["type"] == "message"
+    assert result.output_items[2]["type"] == "function_call"
+
+
+def test_chat_rejects_textual_dsml_instead_of_executing_it() -> None:
+    sdk = _sdk(
+        _response(
+            content=(
+                "<｜｜DSML｜｜tool_calls>\n"
+                "<｜｜DSML｜｜invoke name=\"read_file\">\n"
+                "</｜｜DSML｜｜invoke>\n"
+                "</｜｜DSML｜｜tool_calls>"
+            )
+        )
+    )
+
+    with pytest.raises(ModelProtocolError, match="textual DSML"):
+        OpenAIChatCompletionsClient(_config(), sdk_client=sdk).create_response(
+            ModelRequest(input="Read it")
+        )
 
 
 def test_chat_request_can_disable_tools_for_finalization() -> None:

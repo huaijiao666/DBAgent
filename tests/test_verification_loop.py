@@ -8,6 +8,7 @@ from forge.agent import (
     VerificationStatus,
     VerificationTracker,
 )
+from forge.agent.verification import classify_verification_command
 from forge.llm import FunctionCall, ModelResponse
 from forge.trace import TraceRecorder
 from forge.tools import ToolObservation, create_coding_registry
@@ -69,6 +70,25 @@ def _test_command() -> dict[str, object]:
         "cwd": ".",
         "timeout_seconds": 30,
     }
+
+
+def test_verification_classifier_ignores_test_words_inside_workspace_paths() -> None:
+    assert classify_verification_command(
+        [
+            r"C:\AAA\DBAgent\DBAgent\.venv\Scripts\python.exe",
+            "-m",
+            "compileall",
+            "-q",
+            "snake_game",
+            "tests",
+        ]
+    ) == "compiler"
+    assert classify_verification_command(
+        ["python", "-m", "pytest", "-q"]
+    ) == "test"
+    assert classify_verification_command(["node", "tests.js"]) == "test"
+    assert classify_verification_command(["node", "--test"]) == "test"
+    assert classify_verification_command(["node", "--check", "game.js"]) == "compiler"
 
 
 def _patch(old_line: str, new_line: str) -> dict[str, object]:

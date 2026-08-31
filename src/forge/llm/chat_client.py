@@ -36,6 +36,7 @@ from forge.llm.models import (
     ModelResponse,
     TokenUsage,
 )
+from forge.llm.provider_policy import provider_policy
 
 
 class _ChatCompletionsResource(Protocol):
@@ -68,6 +69,9 @@ class OpenAIChatCompletionsClient:
 
         self._model = config.model
         self._reasoning_effort = config.reasoning_effort
+        self._policy = provider_policy(
+            provider=config.provider, api_mode=config.api_mode
+        )
         if sdk_client is not None:
             self._client = sdk_client
         else:
@@ -101,10 +105,16 @@ class OpenAIChatCompletionsClient:
                 "Unable to reach the Chat Completions provider"
             ) from error
         except APIStatusError as error:
+            status_code = getattr(error, "status_code", None)
+            request_id = getattr(error, "request_id", None)
             raise ModelAPIError(
-                "Chat Completions provider returned an unsuccessful status",
-                status_code=getattr(error, "status_code", None),
-                request_id=getattr(error, "request_id", None),
+                _provider_status_message(
+                    "Chat Completions provider returned an unsuccessful status",
+                    status_code=status_code,
+                    request_id=request_id,
+                ),
+                status_code=status_code,
+                request_id=request_id,
             ) from error
         except APIError as error:
             raise ModelAPIError("Chat Completions request failed") from error
@@ -118,7 +128,23 @@ class OpenAIChatCompletionsClient:
                 raise TypeError("ModelRequest.tools accepts FunctionTool values only")
             tools.append(tool.to_chat_api_dict())
 
-        messages = responses_items_to_chat_messages(request.input)
+        # DeepSeek rejects ``tool_choice`` in thinking mode. A local agent's
+        # finalization turn has already decided that no tools are allowed, so
+        # omit tool definitions entirely rather than sending tool_choice=none.
+        provider_tools = tools
+        if (
+            self._policy.controls_chat_thinking_per_turn
+            and request.tool_choice == "none"
+        ):
+            provider_tools = []
+
+        messages = responses_items_to_chat_messages(
+            request.input,
+            replay_reasoning_content=self._policy.replay_chat_reasoning_content,
+            require_assistant_content_for_tool_calls=(
+                self._policy.requires_assistant_content_for_tool_calls
+            ),
+        )
         if request.instructions is not None:
             messages.insert(0, {"role": "system", "content": request.instructions})
 
@@ -131,8 +157,18 @@ class OpenAIChatCompletionsClient:
             # ``max_tokens`` remains the most widely supported spelling among
             # OpenAI-compatible third-party providers.
             parameters["max_tokens"] = request.max_output_tokens
-        if tools:
-            parameters["tools"] = tools
+        if self._policy.controls_chat_thinking_per_turn:
+            # DeepSeek requires full reasoning_content replay on every later
+            # tool-turn request. A locally budgeted coding agent cannot safely
+            # retain an unbounded chain of that private provider state, so use
+            # native non-thinking function calls while tools are executable.
+            # The final no-tool turn may still use the configured effort.
+            thinking_type = (
+                "disabled" if provider_tools else "enabled"
+            )
+            parameters["extra_body"] = {"thinking": {"type": thinking_type}}
+        if provider_tools:
+            parameters["tools"] = provider_tools
             parameters["tool_choice"] = request.tool_choice
             parameters["parallel_tool_calls"] = request.parallel_tool_calls
         return parameters
@@ -154,6 +190,17 @@ class OpenAIChatCompletionsClient:
                 "Chat Completions response choice did not contain a message"
             )
         output_text = _content_to_text(_read(message, "content", ""))
+        if _contains_textual_tool_markup(output_text):
+            # Textual markup is not a function call. Executing it would bypass
+            # the tool schema/dispatch boundary, so fail clearly instead of
+            # presenting it as a final assistant answer.
+            raise ModelProtocolError(
+                "Chat provider returned textual DSML tool markup instead of "
+                "native function calls; no tool was executed"
+            )
+        reasoning_content = _read(message, "reasoning_content")
+        if not isinstance(reasoning_content, str):
+            reasoning_content = ""
         raw_tool_calls = _read(message, "tool_calls", ()) or ()
         if not isinstance(raw_tool_calls, Sequence) or isinstance(
             raw_tool_calls, (str, bytes)
@@ -163,13 +210,19 @@ class OpenAIChatCompletionsClient:
             )
 
         function_calls: list[FunctionCall] = []
-        output_items: list[dict[str, Any]] = [
+        output_items: list[dict[str, Any]] = []
+        if reasoning_content and self._policy.replay_chat_reasoning_content:
+            # DeepSeek requires this value to be replayed alongside an
+            # assistant tool-call message in thinking mode. It is retained in
+            # the locally-owned context only; it is not printed as an answer.
+            output_items.append({"type": "reasoning", "content": reasoning_content})
+        output_items.append(
             {
                 "type": "message",
                 "role": "assistant",
                 "content": output_text,
             }
-        ]
+        )
         for raw_tool_call in raw_tool_calls:
             tool_type = _read(raw_tool_call, "type", "function")
             if tool_type != "function":
@@ -181,9 +234,10 @@ class OpenAIChatCompletionsClient:
             if function is None:
                 raise ModelProtocolError("Chat Completions tool call lacks function data")
             name = _required_string(function, "name", "function tool call")
-            arguments = _required_string(
+            raw_arguments = _required_string(
                 function, "arguments", "function tool call"
             )
+            arguments = _unwrap_compatibility_arguments(raw_arguments)
             function_calls.append(
                 FunctionCall(
                     call_id=call_id,
@@ -222,12 +276,15 @@ class OpenAIChatCompletionsClient:
 
 def responses_items_to_chat_messages(
     input_items: str | Sequence[Mapping[str, Any]],
+    *,
+    replay_reasoning_content: bool = False,
+    require_assistant_content_for_tool_calls: bool = False,
 ) -> list[dict[str, Any]]:
     """Translate locally-owned Responses input items to Chat messages.
 
-    Reasoning items are intentionally omitted: they are Responses-specific and
-    may contain encrypted provider data. Function calls and their outputs remain
-    explicit so the next Chat Completions request has a valid tool-call history.
+    Encrypted Responses reasoning is always omitted. Plain local reasoning is
+    replayed as Chat Completions ``reasoning_content`` only when the selected
+    provider policy requires it. Function calls and outputs remain explicit.
     """
 
     if isinstance(input_items, str):
@@ -250,6 +307,13 @@ def responses_items_to_chat_messages(
             raise ModelProtocolError("model input item must be a mapping")
         item_type = item.get("type")
         if item_type == "reasoning":
+            if not replay_reasoning_content:
+                continue
+            reasoning_content = _content_to_text(item.get("content", ""))
+            if reasoning_content:
+                if pending_assistant is None:
+                    pending_assistant = {"role": "assistant", "content": None}
+                pending_assistant["reasoning_content"] = reasoning_content
             continue
         if item_type == "function_call":
             call_id = _required_string(item, "call_id", "function call")
@@ -261,6 +325,11 @@ def responses_items_to_chat_messages(
                     "content": None,
                     "tool_calls": [],
                 }
+            if (
+                require_assistant_content_for_tool_calls
+                and pending_assistant.get("content") is None
+            ):
+                pending_assistant["content"] = ""
             pending_assistant.setdefault("tool_calls", []).append(
                 {
                     "id": call_id,
@@ -286,12 +355,20 @@ def responses_items_to_chat_messages(
             role = "assistant"
         if role in {"assistant", "user", "system", "developer"}:
             if role == "assistant":
-                flush_assistant()
-                pending_assistant = {
-                    "role": "assistant",
-                    "content": _content_to_text(item.get("content", ""))
-                    or None,
-                }
+                # A local reasoning item immediately precedes its assistant
+                # message. Coalesce them so Chat Completions receives the
+                # required reasoning_content and tool_calls in one message.
+                if pending_assistant is not None and not (
+                    "reasoning_content" in pending_assistant
+                    and pending_assistant.get("content") is None
+                    and not pending_assistant.get("tool_calls")
+                ):
+                    flush_assistant()
+                if pending_assistant is None:
+                    pending_assistant = {"role": "assistant", "content": None}
+                pending_assistant["content"] = (
+                    _content_to_text(item.get("content", "")) or None
+                )
             else:
                 flush_assistant()
                 messages.append(
@@ -337,6 +414,50 @@ def _content_to_text(content: Any) -> str:
         if parts:
             return "".join(parts)
     return json.dumps(content, ensure_ascii=False, default=str)
+
+
+def _contains_textual_tool_markup(content: str) -> bool:
+    """Recognize provider-emitted DSML without ever interpreting it as a tool."""
+
+    normalized = content.lower()
+    return "dsml" in normalized and "tool_calls" in normalized and "invoke" in normalized
+
+
+def _unwrap_compatibility_arguments(arguments_json: str) -> str:
+    """Normalize a known Chat-Completions wrapper without relaxing tool schemas.
+
+    Some compatible providers occasionally encode a tool's JSON object as
+    ``{"arguments": {...}}``. The wrapper is transport noise, not a project
+    parameter. Unwrap only an exact single-key mapping; all resulting arguments
+    still pass through the normal local ToolRegistry JSON/schema validation.
+    Malformed JSON and all other shapes are intentionally returned unchanged so
+    dispatch can report the ordinary, observable tool error.
+    """
+
+    try:
+        value = json.loads(arguments_json)
+    except json.JSONDecodeError:
+        return arguments_json
+    if (
+        isinstance(value, Mapping)
+        and set(value) == {"arguments"}
+        and isinstance(value["arguments"], Mapping)
+    ):
+        return json.dumps(value["arguments"], ensure_ascii=False, separators=(",", ":"))
+    return arguments_json
+
+
+def _provider_status_message(
+    prefix: str, *, status_code: object, request_id: object
+) -> str:
+    """Expose safe debugging identifiers without logging response bodies."""
+
+    details: list[str] = []
+    if isinstance(status_code, int):
+        details.append(f"HTTP {status_code}")
+    if isinstance(request_id, str) and request_id:
+        details.append(f"request_id={request_id}")
+    return prefix if not details else f"{prefix} ({', '.join(details)})"
 
 
 def _normalize_chat_usage(usage: Any) -> TokenUsage | None:

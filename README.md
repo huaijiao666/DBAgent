@@ -110,9 +110,9 @@ Forge 在本地组装和维护；两个 adapter 都不使用 `previous_response_
 
 ## 运行 Agent
 
-任务是位置参数。未传 `--workspace` 时，DBA 会从当前目录向上查找项目标记，
-例如 `.git`、`pyproject.toml`、`package.json`、README + `tests/src`，选择最近的
-可信项目根目录；显式传入时则严格使用该目录：
+任务是位置参数。未传 `--workspace` 时，`forge` 和 `DBA` 都严格使用启动命令时的
+当前目录，避免父目录的 `.git`、`pytest.ini` 或 README 意外扩大 workspace。确实
+需要从嵌套 package 向上搜索项目根时，再显式传入 `--discover-workspace`：
 
 ```powershell
 forge "inspect this repository and explain its architecture" `
@@ -123,7 +123,8 @@ forge "inspect this repository and explain its architecture" `
 常用选项：
 
 ```text
---workspace PATH       workspace 根目录（默认：从当前目录自动识别）
+--workspace PATH       workspace 根目录（默认：精确当前目录）
+--discover-workspace   显式向父目录搜索最近项目根
 --max-steps N          模型轮数硬上限（默认：24）
 --mode MODE            auto、ask 或 code（默认：auto）
 --trace-file PATH      workspace 内的 JSONL trace 路径
@@ -168,6 +169,14 @@ OK   5.8s |  5/12 | VERIFY  status=passed  kind=test  return_code=0
 DBA --workspace .
 ```
 
+直接运行 `DBA` 与 `DBA --workspace .` 等价：默认 workspace 就是启动命令时的
+**精确当前目录**，不会因为父目录存在 `.git`、`pytest.ini` 或 `README.md` 而悄悄
+扩大权限范围。确实希望从 `src/package` 向上寻找项目根时，才显式使用：
+
+```powershell
+DBA --discover-workspace
+```
+
 如果备份配置中的模型在当前 provider 上不可用，可以只对本次进程显式覆盖，
 而不修改备份文件：
 
@@ -193,10 +202,22 @@ hint，以及 patch、测试、命令和错误等关键工具 observation；下�
 摘要重新注入 prompt。代码发生修改后，之前的通过验证会自动标为 `stale`，
 避免把旧证据误当成当前结果。
 
-每轮请求会原子保存到 workspace 的 `.forge/session.json`，其中只包含裁剪后的
-对话、plan、验证摘要和关键 observation，并沿用 trace 的敏感值脱敏规则。重新
-打开同一工作目录后输入 `/resume` 即可恢复；该文件受 `.gitignore` 保护，不会
-使用 provider 的服务端 conversation state。`/clear` 会同时清除内存和该文件。
+每轮请求会原子保存到 workspace 的 `.forge/sessions/<SESSION_ID>.json`，其中只
+包含裁剪后的对话、plan、验证摘要和关键 observation，并沿用 trace 的敏感值
+脱敏规则。重新打开同一工作目录后，使用 `/sessions` 查看 ID，再用
+`/resume <ID>` 精确恢复；`/resume latest` 恢复最近更新的会话。旧版本的
+`.forge/session.json` 会作为 `legacy` 会话继续可读。所有文件均受 `.gitignore`
+保护，不使用 provider 的服务端 conversation state。
+
+每次启动都会创建一个标记为 `[new]` 的空 session ID，**不会自动恢复历史**。
+成功 `/resume <ID>` 后终端会显示 `Resumed context` 面板，明确列出恢复的标题、
+聊天轮数、verification、关键 observation 数量以及是否恢复了 plan；若存在 plan
+和验证摘要，也会紧接着可视化展示。
+
+长任务会在每个完成的 Agent step 后写入本地 checkpoint；即使 provider 失败或用户
+中断，已完成的 plan 更新、验证结果和关键工具 observation 也会保存为
+`Checkpoint: interrupted`，之后可用 `/resume <ID>` 恢复。尚未返回的那一次模型
+请求本身无法从中间继续，但其用户任务文本在请求前已保存。
 
 当上一个 code 任务留下未完成 plan，用户明确输入“继续/接着”或 `continue/resume`
 时，REPL 会把该 plan 恢复为下一轮的真实 runtime state，而不只是复制一段文本；
@@ -206,16 +227,26 @@ hint，以及 patch、测试、命令和错误等关键工具 observation；下�
 内置命令：
 
 ```text
-/model                 查看当前模型
-/model gpt-5.6-sol     将后续请求切换到指定模型
+/models                显示可直接选择的模型别名与 provider
+/model                 显示模型别名；也可继续输入 provider 的原始模型名
+/model luna            使用启动时备份配置的 gpt-5.6-luna
+/model terra           使用启动时备份配置的 gpt-5.6-terra
+/model sol             使用启动时备份配置的 gpt-5.6-sol
+/model deepseek-flash  使用 DeepSeek V4 Flash
+/model deepseek-pro    使用 DeepSeek V4 Pro
+/reasoning             查看当前 reasoning effort 和可用等级
+/reasoning high        对后续请求设置 reasoning effort
 /mode                  查看当前任务模式
 /mode auto             自动区分问答与编码任务
 /mode ask              只做仓库调查和回答，不开放编辑工具
 /mode code             开放规划、patch、命令和验证能力
 /status                查看模型、会话轮数和最近任务状态
 /plan                  查看当前会话保留的最新结构化 plan
-/resume                恢复当前 workspace 最近保存的 DBA 会话
-/clear                 清空本地会话历史（不会删除代码）
+/sessions              列出当前 workspace 的会话 ID、时间、轮数和验证状态
+/resume <ID>           恢复指定会话
+/resume latest         恢复最近更新的会话
+/new                   开始新会话并保留已有会话
+/clear                 清空并删除当前会话，保留其他会话（不会删除代码）
 /help                  显示帮助
 /exit                  退出 DBA
 ```
@@ -225,6 +256,17 @@ hint，以及 patch、测试、命令和错误等关键工具 observation；下�
 `experimental_bearer_token`、`model` 和 `model_reasoning_effort`。这些值只
 进入当前 Python 进程中的配置对象，不会修改父进程环境；备份文件必须放在
 repository 外，不要提交或复制到 trace。
+
+选择 `/model deepseek-flash` 或 `/model deepseek-pro` 时，DBA 会在**当次
+切换**从 `C:\\AAA\\DBAgent\\api_key.txt` 读取唯一的非空 key 行，并使用
+`https://api.deepseek.com` 的 Chat Completions 兼容接口。该 key 不写入环境、
+session、trace、终端输出或本 repository；切回 `luna`、`terra` 或 `sol` 会恢复
+本次启动时的备份 provider 凭证和 URL。DeepSeek 的两个预设使用显式的
+`deepseek` provider policy，`/reasoning` 仍可在 `none`、`low`、`medium`、`high`、`xhigh`、`max` 间调整。
+为了在本地有预算的多工具 Agent loop 中保持原生 function calling 稳定，执行工具的
+DeepSeek 子轮会自动使用 non-thinking mode；最终的无工具回答轮才使用配置的 thinking
+和 reasoning effort。这样不会要求 harness 无限制地保留 DeepSeek 的私有 reasoning
+链，也不会把文本 DSML 误当作工具调用执行。
 
 Windows 是默认运行路径。WSL 可以单独安装 Python、editable package 和 provider
 配置，但它不会自动复用 Windows 的 `.venv` 或 Windows 路径；当前项目没有必要
@@ -308,7 +350,12 @@ DBA 时会追加新事件，不会截断之前用于诊断失败的历史。
 
 `ContextManager` 在明确的字符预算下保存 persistent task context、当前 plan、
 repository map、相关代码和 recent observations。旧 observation 会在本地
-compact；不会使用托管 conversation memory。
+compact；不会使用托管 conversation memory。默认总上限为 80,000 字符（用字符
+数做 tokenizer-independent 的保守边界）：最近 8 条 observation 可保留原文，单条
+最多 6,000 字符；更早的结果变成本地摘要。每次 `model_request` 会显示近似 token
+占用、保留的 recent observation 和已摘要数量；出现“上下文摘要”并不等于丢失全部
+历史，`truncated` 才表示某条特别长的原始输出被截断。长时间等待 provider 时，终端会输出降频
+心跳，但心跳不会写入 JSONL，也不表示模型已经取得实际进展。
 
 ## 开发与测试
 
@@ -358,7 +405,7 @@ tests/                              unit、安全和端到端测试
 - 返回给模型的输出会截断，但 subprocess 捕获本身不是严格的内存配额。
 - `apply_patch` 是受限的 exact-context protocol，不是完整 unified diff，也不
   提供 file locking。
-- `/resume` 恢复的是裁剪后的对话与结构化任务状态，不会重放进程崩溃前已经完成
+- `/resume <ID>` 恢复的是裁剪后的对话与结构化任务状态，不会重放进程崩溃前已经完成
   但尚未写入 session checkpoint 的单个模型推理；本轮用户请求会在 API 调用前
   先保存，因此至少不会丢失任务文本。
 - `create_file`/`write_file` 仍是过渡编辑工具，patching 才是首选接口。

@@ -61,3 +61,28 @@ def discover_workspace(start: Path) -> WorkspaceDiscovery:
 
     root, markers = fallback or (resolved, ())
     return WorkspaceDiscovery(resolved, root, markers)
+
+
+def select_workspace(
+    start: Path,
+    *,
+    discover_parent: bool = False,
+) -> WorkspaceDiscovery:
+    """Select the exact launch directory unless upward discovery is requested.
+
+    A coding agent's filesystem authority should match the directory the user
+    launched it from. Parent discovery is useful, but it is surprising and can
+    accidentally combine unrelated nested projects, so the CLI exposes it as an
+    explicit opt-in instead of silently widening the workspace.
+    """
+
+    if discover_parent:
+        return discover_workspace(start)
+    resolved = start.resolve(strict=True)
+    if not resolved.is_dir():
+        raise ValueError(f"workspace start is not a directory: {start}")
+    strong = tuple(name for name in _STRONG_MARKERS if (resolved / name).exists())
+    supporting = tuple(
+        name for name in _SUPPORTING_MARKERS if (resolved / name).exists()
+    )
+    return WorkspaceDiscovery(resolved, resolved, strong + supporting)

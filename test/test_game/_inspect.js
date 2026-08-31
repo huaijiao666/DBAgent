@@ -1,0 +1,11 @@
+const { SnakeGame, mulberry32 } = require('./game.js');
+const game = new SnakeGame({ cols: 10, rows: 10, startLength: 3, rng: mulberry32(42) });
+console.log('PROPS:', Object.keys(game).join(','));
+console.log('PROTO:', Object.getOwnPropertyNames(Object.getPrototypeOf(game)).join(','));
+console.log('snake:', JSON.stringify(game.snake));
+console.log('status:', game.status, 'direction:', game.direction, 'score:', game.score, 'food:', JSON.stringify(game.food));
+console.log('interval:', game.currentInterval ? game.currentInterval() : 'no currentInterval');
+game.start();
+console.log('after start status:', game.status);
+game.step();
+console.log('after step snake len:', game.snake.length, 'steps:', game.steps, 'status:', game.status);

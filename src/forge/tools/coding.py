@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -45,8 +46,10 @@ def create_coding_registry(workspace_root: Path) -> ToolRegistry:
                 name="run_command",
                 description=(
                     "Run one argument-vector command inside the workspace without a "
-                    "shell. Returns stdout, stderr, return code, timeout, and "
-                    "truncation metadata."
+                    "shell. Prefer a JSON array of strings. A single command string "
+                    "is accepted as a compatibility fallback and is parsed locally; "
+                    "it never enables shell syntax. Returns stdout, stderr, return "
+                    "code, timeout, and truncation metadata."
                 ),
                 parameters=object_schema(
                     {
@@ -191,16 +194,37 @@ def _patch_schema() -> dict[str, Any]:
 def _run_command(
     executor: CommandExecutor, arguments: Mapping[str, Any]
 ) -> dict[str, object]:
-    command = arguments.get("command")
-    if isinstance(command, (str, bytes)) or not isinstance(command, Sequence):
-        raise ValueError("command must be an array of strings")
-    if any(not isinstance(part, str) for part in command):
-        raise ValueError("command must be an array of strings")
+    command = _command_arguments(arguments.get("command"))
     cwd = _required_string(arguments, "cwd")
     timeout = arguments.get("timeout_seconds")
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
         raise ValueError("timeout_seconds must be a number")
     return executor.run(command, cwd=cwd, timeout_seconds=timeout).to_dict()
+
+
+def _command_arguments(value: Any) -> list[str]:
+    """Normalize an argv vector without ever invoking a shell.
+
+    The function-call schema continues to prefer an explicit JSON array. The
+    string fallback helps OpenAI-compatible providers that occasionally emit a
+    command as text despite the schema; shell operators remain ordinary argv
+    tokens and therefore cannot alter command execution semantics.
+    """
+
+    if isinstance(value, str):
+        try:
+            command = shlex.split(value, posix=True)
+        except ValueError as error:
+            raise ValueError(
+                "command string could not be parsed; use an array of strings"
+            ) from error
+    elif not isinstance(value, (bytes, bytearray)) and isinstance(value, Sequence):
+        command = list(value)
+    else:
+        raise ValueError("command must be an array of strings or one command string")
+    if not command or any(not isinstance(part, str) or not part for part in command):
+        raise ValueError("command must be an array of non-empty strings")
+    return command
 
 
 def _apply_patch(
@@ -213,6 +237,11 @@ def _apply_patch(
 def _create_file(workspace: Workspace, arguments: Mapping[str, Any]) -> dict[str, object]:
     path = workspace.resolve_for_create(_required_string(arguments, "path"))
     content = _content(arguments)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Re-resolve after directory creation to close the obvious symlink boundary
+    # check before opening the target. The final ``x`` mode still prevents an
+    # existing file from being overwritten.
+    workspace.resolve_directory(str(path.parent))
     with path.open("x", encoding="utf-8", newline="") as file:
         file.write(content)
     relative_path = workspace.relative_name(path)

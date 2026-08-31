@@ -180,37 +180,69 @@ def classify_verification_command(command: Sequence[str]) -> str | None:
 
     if not command:
         return None
-    normalized = " ".join(part.casefold() for part in command)
-    executable_names = " ".join(Path(part).name.casefold() for part in command)
-    text = f"{normalized} {executable_names}"
-    if any(token in text for token in ("pytest", "py.test", "unittest", " test")):
+    executable = Path(command[0]).name.casefold()
+    arguments = tuple(part.casefold() for part in command[1:])
+    module = _python_module(arguments)
+    first_argument = arguments[0] if arguments else ""
+
+    if (
+        executable in {"pytest", "pytest.exe", "py.test", "py.test.exe"}
+        or module in {"pytest", "py.test", "unittest"}
+        or (
+            executable in {"node", "node.exe"}
+            and (
+                "--test" in arguments
+                or any(_is_node_test_file(argument) for argument in arguments)
+            )
+        )
+        or (executable in {"npm", "pnpm", "yarn"} and first_argument == "test")
+        or (executable in {"cargo", "go"} and first_argument == "test")
+    ):
         return "test"
-    if any(
-        token in text
-        for token in (
-            "compileall",
-            " mypy",
-            " pyright",
-            " tsc",
-            " cargo check",
-            " go vet",
-            " mvn compile",
-            " gradle compile",
+    if (
+        module == "compileall"
+        or (executable in {"node", "node.exe"} and "--check" in arguments)
+        or executable in {"mypy", "mypy.exe", "pyright", "pyright.exe", "tsc", "tsc.exe"}
+        or (executable == "cargo" and first_argument == "check")
+        or (executable == "go" and first_argument == "vet")
+        or (
+            executable in {"mvn", "mvn.cmd", "gradle", "gradlew", "gradlew.bat"}
+            and first_argument == "compile"
         )
     ):
         return "compiler"
-    if any(
-        token in text
-        for token in (
-            "ruff",
-            "flake8",
-            "pylint",
-            " black --check",
-            " isort --check",
-        )
+    if executable in {
+        "ruff",
+        "ruff.exe",
+        "flake8",
+        "flake8.exe",
+        "pylint",
+        "pylint.exe",
+    } or (
+        executable in {"black", "black.exe", "isort", "isort.exe"}
+        and "--check" in arguments
     ):
         return "lint"
     return None
+
+
+def _python_module(arguments: Sequence[str]) -> str | None:
+    """Return the module passed to ``python -m`` without inspecting paths."""
+
+    try:
+        index = arguments.index("-m")
+    except ValueError:
+        return None
+    return arguments[index + 1] if index + 1 < len(arguments) else None
+
+
+def _is_node_test_file(argument: str) -> bool:
+    """Recognize conventional deterministic JavaScript test file names."""
+
+    filename = Path(argument).name
+    return filename in {"test.js", "tests.js", "test.mjs", "tests.mjs"} or (
+        filename.endswith((".test.js", ".spec.js", ".test.mjs", ".spec.mjs"))
+    )
 
 
 def _command_tuple(value: Any) -> tuple[str, ...]:
