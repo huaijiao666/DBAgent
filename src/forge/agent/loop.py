@@ -11,7 +11,11 @@ from forge.agent.context import ContextBudget, ContextManager
 from forge.agent.mode import TaskMode, instructions_for_mode, resolve_task_mode
 from forge.agent.plan import PlanStore, TaskPlan, update_plan_tool
 from forge.agent.state import AgentState, AgentStatus
-from forge.agent.verification import VerificationStatus, VerificationTracker
+from forge.agent.verification import (
+    VerificationStatus,
+    VerificationTracker,
+    suggested_verification_commands,
+)
 from forge.llm import (
     ModelConnectionError,
     ModelAPIError,
@@ -124,6 +128,9 @@ class AgentLoop:
         no_progress_rounds = 0
         malformed_patch_failures = 0
         patch_reinspection_required = False
+        write_fallback_available = False
+        repair_required = False
+        repair_readonly_rounds = 0
         last_reported_compaction = (0, 0)
         ask_tool_rounds = 0
         seen_evidence: set[tuple[tuple[str, str], int]] = set()
@@ -162,6 +169,17 @@ class AgentLoop:
                 if patch_reinspection_required
                 else tool_schemas
             )
+            if resolved_mode is TaskMode.CODE and not write_fallback_available:
+                request_tool_schemas = tuple(
+                    tool for tool in request_tool_schemas if tool.name != "write_file"
+                )
+            repair_action_required = repair_required and repair_readonly_rounds >= 2
+            if repair_action_required:
+                request_tool_schemas = tuple(
+                    tool
+                    for tool in request_tool_schemas
+                    if tool.name not in _READ_PROGRESS_TOOLS
+                )
             snapshot = context_manager.build_context(step=state.step)
             state.context = list(snapshot.input_items)
             state.context_usage.append(snapshot.usage)
@@ -211,6 +229,13 @@ class AgentLoop:
             request_instructions = self._instructions or instructions_for_mode(
                 resolved_mode
             )
+            if repair_action_required:
+                request_instructions += (
+                    "\n\nA deterministic check has failed and two diagnosis rounds "
+                    "have already completed. Reading/discovery tools are temporarily "
+                    "withheld. Use the evidence you have: apply a focused patch, run "
+                    "a targeted verification command, or update the plan honestly."
+                )
             remaining_after_this_turn = state.max_steps - state.step
             if (
                 resolved_mode is TaskMode.CODE
@@ -235,7 +260,12 @@ class AgentLoop:
                     input=snapshot.input_items,
                     instructions=request_instructions,
                     tools=request_tool_schemas,
-                    parallel_tool_calls=True,
+                    # A coding turn can mutate files or verify a mutation.
+                    # Ask providers for one decision at a time so a second
+                    # call is not planned against a file state that the first
+                    # call is about to change. Read-only ASK mode keeps safe
+                    # parallel discovery available.
+                    parallel_tool_calls=resolved_mode is TaskMode.ASK,
                     tool_choice="none" if force_final else "auto",
                 ),
                 step=state.step,
@@ -339,6 +369,10 @@ class AgentLoop:
             executed_calls = []
             turn_progress = False
             turn_repeated_evidence = False
+            round_had_mutation = False
+            round_had_failed_verification = False
+            round_had_successful_verification = False
+            truncated_tool_calls = _tool_calls_may_be_truncated(response)
             for call in response.function_calls:
                 state.tool_calls.append(call)
                 tool_start_payload = _tool_start_payload(call)
@@ -350,7 +384,41 @@ class AgentLoop:
                     state.step,
                     tool_start_payload,
                 )
-                if call.name == "apply_patch" and patch_reinspection_required:
+                if truncated_tool_calls:
+                    observation = ToolObservation(
+                        call_id=call.call_id,
+                        tool_name=call.name,
+                        success=False,
+                        content=(
+                            "Tool call was not executed because the model response "
+                            "hit its output-length limit and its arguments may be "
+                            "incomplete. Re-issue one complete native function call."
+                        ),
+                    )
+                elif call.name == "write_file" and not write_fallback_available:
+                    observation = ToolObservation(
+                        call_id=call.call_id,
+                        tool_name=call.name,
+                        success=False,
+                        content=(
+                            "write_file is withheld by default because it replaces an "
+                            "entire existing file. Use apply_patch for a focused edit. "
+                            "It becomes available only after an apply_patch failure as "
+                            "a small-file fallback."
+                        ),
+                    )
+                elif call.name in _READ_PROGRESS_TOOLS and repair_action_required:
+                    observation = ToolObservation(
+                        call_id=call.call_id,
+                        tool_name=call.name,
+                        success=False,
+                        content=(
+                            "Diagnosis read budget is exhausted after a deterministic "
+                            "verification failure. Use apply_patch or run_command with "
+                            "the existing failure evidence."
+                        ),
+                    )
+                elif call.name == "apply_patch" and patch_reinspection_required:
                     observation = ToolObservation(
                         call_id=call.call_id,
                         tool_name=call.name,
@@ -370,7 +438,12 @@ class AgentLoop:
                     state.step,
                     _tool_result_payload(call, observation),
                 )
-                if call.name == "apply_patch" and not observation.success:
+                if (
+                    call.name == "apply_patch"
+                    and not observation.success
+                    and not patch_reinspection_required
+                ):
+                    write_fallback_available = True
                     if _has_malformed_arguments(observation):
                         malformed_patch_failures += 1
                     _append_hint(
@@ -410,10 +483,15 @@ class AgentLoop:
                             },
                         )
                 event = verification.observe(call, observation)
+                if call.name == "write_file" and observation.success:
+                    write_fallback_available = False
+                if call.name == "apply_patch" and event.mutation:
+                    write_fallback_available = False
                 if observation.success and call.name in _PATCH_FRESHNESS_TOOLS:
                     patch_reinspection_required = False
                 turn_progress = turn_progress or event.mutation
                 if event.mutation:
+                    round_had_mutation = True
                     _append_hint(
                         state,
                         context_manager,
@@ -425,6 +503,22 @@ class AgentLoop:
                         trace=self._trace,
                         step=state.step,
                     )
+                    suggestions = suggested_verification_commands(call, observation)
+                    if suggestions:
+                        rendered = " or ".join(
+                            " ".join(command) for command in suggestions
+                        )
+                        _append_hint(
+                            state,
+                            context_manager,
+                            (
+                                "Local deterministic verification suggestion for "
+                                f"the changed file(s): {rendered}. Run it now unless "
+                                "a more targeted repository test is available."
+                            ),
+                            trace=self._trace,
+                            step=state.step,
+                        )
                     if call.name == "apply_patch":
                         patch_reinspection_required = True
                         _append_hint(
@@ -458,8 +552,10 @@ class AgentLoop:
                         verification.status,
                     )
                     if event.record.passed:
+                        round_had_successful_verification = True
                         turn_progress = True
                     else:
+                        round_had_failed_verification = True
                         _append_hint(
                             state,
                             context_manager,
@@ -504,6 +600,26 @@ class AgentLoop:
                 state.plan = plan_store.plan
                 state.plan_history = list(plan_store.history)
                 context_manager.set_plan(plan_store.plan.to_prompt())
+            if round_had_mutation or round_had_successful_verification:
+                repair_required = False
+                repair_readonly_rounds = 0
+            elif round_had_failed_verification:
+                repair_required = True
+                repair_readonly_rounds = 0
+            elif repair_required:
+                repair_readonly_rounds += 1
+                if repair_readonly_rounds == 2:
+                    _append_hint(
+                        state,
+                        context_manager,
+                        (
+                            "Two diagnosis rounds followed a deterministic test failure. "
+                            "The next round withholds read/discovery tools so you must "
+                            "apply a focused fix, rerun verification, or update the plan."
+                        ),
+                        trace=self._trace,
+                        step=state.step,
+                    )
             no_progress_rounds = (
                 0 if turn_progress else no_progress_rounds + 1
             )
@@ -1037,3 +1153,22 @@ def _is_retryable_model_error(error: ModelCommunicationError) -> bool:
         isinstance(error, ModelAPIError)
         and error.status_code in _RETRYABLE_API_STATUS_CODES
     )
+
+
+def _tool_calls_may_be_truncated(response: ModelResponse) -> bool:
+    """Refuse to execute tools emitted by an output-limited model response.
+
+    Providers can return JSON that happens to parse after reaching an output
+    limit, while silently omitting the end of a command or patch. Treating that
+    call as executable would turn an output-token limit into a local side
+    effect. Both Chat Completions' ``length`` finish reason and Responses'
+    ``max_output_tokens`` incomplete detail normalize into this guard.
+    """
+
+    if not response.function_calls:
+        return False
+    if response.status.casefold() in {"length", "incomplete"}:
+        return True
+    details = response.incomplete_details or {}
+    reason = details.get("reason")
+    return reason in {"max_output_tokens", "length"}

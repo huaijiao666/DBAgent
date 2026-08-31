@@ -61,7 +61,10 @@ def test_read_file_can_return_a_specific_inclusive_line_range(tmp_path: Path) ->
     )
 
     assert observation.success is True
-    assert observation.content == "2: two\n3: three"
+    assert observation.content == (
+        "2: two\n3: three\n"
+        "[showing lines 2-3 of 4; use start_line=4 to continue.]"
+    )
 
 
 def test_read_file_returns_a_clear_result_for_an_empty_file(tmp_path: Path) -> None:

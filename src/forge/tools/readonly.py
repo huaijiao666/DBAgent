@@ -156,10 +156,11 @@ def _read_file(workspace: Workspace, arguments: Mapping[str, Any]) -> str:
         raise ValueError("end_line must be greater than or equal to start_line")
     if start_line > len(lines):
         return f"[no lines in requested range; file has {len(lines)} lines]"
+    selected_end_line = min(end_line, len(lines))
     numbered = "\n".join(
         f"{line_number}: {line}"
         for line_number, line in enumerate(
-            lines[start_line - 1 : end_line], start=start_line
+            lines[start_line - 1 : selected_end_line], start=start_line
         )
     )
     if not numbered:
@@ -167,7 +168,16 @@ def _read_file(workspace: Workspace, arguments: Mapping[str, Any]) -> str:
     if len(numbered) > _MAX_READ_CHARACTERS:
         return (
             numbered[:_MAX_READ_CHARACTERS]
-            + f"\n[truncated after {_MAX_READ_CHARACTERS} characters]"
+            + (
+                f"\n[truncated after {_MAX_READ_CHARACTERS} characters; file has "
+                f"{len(lines)} lines. Use a narrower start_line/end_line range.]"
+            )
+        )
+    if selected_end_line < len(lines):
+        return (
+            numbered
+            + f"\n[showing lines {start_line}-{selected_end_line} of {len(lines)}; "
+            f"use start_line={selected_end_line + 1} to continue.]"
         )
     return numbered
 

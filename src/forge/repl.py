@@ -120,7 +120,7 @@ class ForgeRepl:
         self,
         *,
         workspace: Path,
-        max_steps: int = 12,
+        max_steps: int = 40,
         trace_file: Path | None = None,
         config_path: Path | None = None,
         model_override: str | None = None,
@@ -163,6 +163,7 @@ class ForgeRepl:
         self._session_id = self._session_store.new_session_id()
         self._session_title = ""
         self._last_state: Any | None = None
+        self._queued_task: str | None = None
 
     def run(self) -> int:
         """Start the REPL and return a process-style exit code."""
@@ -265,7 +266,10 @@ class ForgeRepl:
                 if not should_continue:
                     ui.goodbye()
                     return 0
-                continue
+                if self._queued_task is None:
+                    continue
+                line = self._queued_task
+                self._queued_task = None
 
             prompt = self._conversation.build_prompt(line)
             prompt = self._session_context.augment_prompt(prompt)
@@ -453,6 +457,37 @@ class ForgeRepl:
         if command == "status":
             self._render_status(config, ui)
             return True, config, model_client
+        if command == "steps":
+            if not argument:
+                ui.info(
+                    f"Current step budget: {self.max_steps} model turns per task. "
+                    "Use /steps N to change it for this DBA session."
+                )
+                return True, config, model_client
+            try:
+                self.max_steps = _positive_integer(argument)
+            except ValueError:
+                ui.error("/steps accepts one positive integer, for example /steps 48")
+                return True, config, model_client
+            ui.info(f"Step budget changed to {self.max_steps} model turns per task.")
+            return True, config, model_client
+        if command == "continue":
+            if self._session_context.plan is None or self._session_context.plan.is_complete:
+                ui.error("No unfinished plan is available in this session to continue.")
+                return True, config, model_client
+            if argument:
+                try:
+                    self.max_steps = _positive_integer(argument)
+                except ValueError:
+                    ui.error(
+                        "/continue accepts an optional positive integer, for example /continue 48"
+                    )
+                    return True, config, model_client
+            self._queued_task = "continue this task"
+            ui.info(
+                f"Continuing the unfinished plan with a fresh {self.max_steps}-step budget."
+            )
+            return True, config, model_client
         if command == "plan":
             if self._session_context.plan is None:
                 ui.info("No plan is currently retained in this DBA session.")
@@ -614,6 +649,7 @@ class ForgeRepl:
                 f"session={self._session_id}; model={config.model}; provider={config.provider}; api={config.api_mode}; "
                 f"reasoning={config.reasoning_effort}; "
                 f"task_mode={self._mode.value}; "
+                f"step_budget={self.max_steps}; "
                 f"turns={self._conversation.turn_count}; "
                 f"{self._session_context.status_line()}; no task run yet"
             )
@@ -635,6 +671,7 @@ class ForgeRepl:
             f"session={self._session_id}; model={config.model}; provider={config.provider}; api={config.api_mode}; "
             f"reasoning={config.reasoning_effort}; "
             f"task_mode={self._mode.value}; "
+            f"step_budget={self.max_steps}; "
             f"turns={self._conversation.turn_count}; "
             f"last_status={status}; verification={verification}; "
             f"{context}; {self._session_context.status_line()}"
@@ -676,8 +713,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--max-steps",
         type=_positive_integer,
-        default=24,
-        help="Maximum model turns per user request (default: 24).",
+        default=40,
+        help="Maximum model turns per user request (default: 40).",
     )
     parser.add_argument(
         "--mode",

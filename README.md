@@ -125,7 +125,7 @@ forge "inspect this repository and explain its architecture" `
 ```text
 --workspace PATH       workspace 根目录（默认：精确当前目录）
 --discover-workspace   显式向父目录搜索最近项目根
---max-steps N          模型轮数硬上限（默认：24）
+--max-steps N          模型轮数硬上限（默认：40）
 --mode MODE            auto、ask 或 code（默认：auto）
 --trace-file PATH      workspace 内的 JSONL trace 路径
                        （默认：.forge/trace.jsonl）
@@ -236,6 +236,7 @@ hint，以及 patch、测试、命令和错误等关键工具 observation；下�
 /model deepseek-pro    使用 DeepSeek V4 Pro
 /reasoning             查看当前 reasoning effort 和可用等级
 /reasoning high        对后续请求设置 reasoning effort
+/steps [N]             查看或设置本 REPL 后续任务的 model turn 上限
 /mode                  查看当前任务模式
 /mode auto             自动区分问答与编码任务
 /mode ask              只做仓库调查和回答，不开放编辑工具
@@ -245,11 +246,18 @@ hint，以及 patch、测试、命令和错误等关键工具 observation；下�
 /sessions              列出当前 workspace 的会话 ID、时间、轮数和验证状态
 /resume <ID>           恢复指定会话
 /resume latest         恢复最近更新的会话
+/continue [N]          继续当前未完成 plan；可选地设定新的 step budget
 /new                   开始新会话并保留已有会话
 /clear                 清空并删除当前会话，保留其他会话（不会删除代码）
 /help                  显示帮助
 /exit                  退出 DBA
 ```
+
+`max_steps` 不是模型能力的固定上限，而是 DBAgent 每个本地 Agent run 的安全预算：
+它避免模型、provider 或工具异常时无限消耗时间和额度。普通命令默认 40 步；可用
+`DBA --max-steps 64`、REPL 中的 `/steps 64`，或在已中断任务后直接
+`/continue 64`。续跑会恢复本地 plan、关键 observation 和验证状态，但开始一个新的、
+明确受限的 Agent run，而不是悄悄无限循环。
 
 `DBA` 默认优先读取用户目录下的备份 provider TOML（也可以用
 `--config-path PATH` 或环境变量 `FORGE_BACKUP_CONFIG` 指定其他文件），提取当前 provider 的 `base_url`、

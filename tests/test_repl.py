@@ -246,9 +246,40 @@ def test_repl_help_and_unknown_command_do_not_call_model(
     output = stream.getvalue()
     assert "/model [NAME]" in output
     assert "/resume" in output
+    assert "/steps" in output
+    assert "/continue" in output
     assert "/sessions" in output
     assert "Unknown command '/not-a-command'" in output
     assert not _FakeLoop.calls
+
+
+def test_repl_steps_and_continue_start_a_fresh_bounded_run(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = ForgeConfig(openai_api_key="fake-token")
+    monkeypatch.setattr("forge.repl.load_repl_config", lambda _path: config)
+    monkeypatch.setattr("forge.repl.AgentLoop", _FakeLoop)
+    _FakeLoop.calls = []
+    _FakeLoop.initial_plans = []
+    output = io.StringIO()
+    inputs = iter(["build a project", "/steps 7", "/continue 9", "/exit"])
+    repl = ForgeRepl(
+        workspace=tmp_path,
+        mode="code",
+        input_function=lambda _prompt: next(inputs),
+        stream=output,
+        model_factory=lambda _config: object(),
+        registry_factory=lambda _workspace: object(),
+    )
+
+    assert repl.run() == 0
+    assert len(_FakeLoop.calls) == 2
+    assert _FakeLoop.calls[1][0].endswith("[user]\ncontinue this task")
+    assert _FakeLoop.initial_plans[1] is not None
+    assert repl.max_steps == 9
+    rendered = output.getvalue()
+    assert "Step budget changed to 7" in rendered
+    assert "fresh 9-step budget" in rendered
 
 
 def test_repl_lists_and_resumes_a_specific_session(

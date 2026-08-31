@@ -90,6 +90,17 @@ before completion run the most appropriate final test, compiler, or linter. Neve
 claim a command passed unless its returned result proves it. Tests involving time,
 randomness, environment state, or I/O must control those inputs explicitly (for
 example with injected RNGs, fakes, or fixed fixtures) so repeated runs are stable.
+For a new project, a feature with several deliverables, or a debugging task that
+needs investigation, create the structured plan before the first mutation. Build
+the smallest runnable, testable skeleton first, then improve UX or optional
+features. When the request names multiple files, modules, or assets, make those
+deliverables explicit in the plan and create each missing file in its appropriate
+role; do not silently collapse a multi-file project into one large source file.
+After creating a skeleton, list or read the files once to confirm the intended
+structure before extending it. Prefer dependencies already declared in the
+repository or the standard library. If a dependency is unavailable, do not
+repeatedly install it: explain the evidence, choose a viable local fallback, and
+keep deterministic tests possible.
 If apply_patch reports Invalid JSON arguments, that call never reached the patch
 engine. Do not repeat it unchanged: for a small, already inspected existing file,
 use write_file as the explicit fallback, then verify the resulting file."""

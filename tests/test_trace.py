@@ -18,8 +18,8 @@ def test_trace_is_jsonl_and_redacts_sensitive_values(tmp_path: Path) -> None:
         step=2,
         payload={
             "tool_name": "run_command",
-            "api_key": "sk-test-secret-value",
-            "note": "Authorization: Bearer hidden-value",
+            "api_key": "synthetic-secret-value",
+            "note": "Authorization: Bearer synthetic-token",
         },
     )
     recorder.close()
@@ -30,7 +30,7 @@ def test_trace_is_jsonl_and_redacts_sensitive_values(tmp_path: Path) -> None:
     assert event["event"] == "tool_start"
     assert event["step"] == 2
     serialized = json.dumps(event, ensure_ascii=False)
-    assert "sk-test-secret-value" not in serialized
+    assert "synthetic-secret-value" not in serialized
     assert "hidden-value" not in serialized
     assert "TOOL -> run_command" in console.getvalue()
 

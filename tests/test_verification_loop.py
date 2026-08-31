@@ -8,7 +8,10 @@ from forge.agent import (
     VerificationStatus,
     VerificationTracker,
 )
-from forge.agent.verification import classify_verification_command
+from forge.agent.verification import (
+    classify_verification_command,
+    suggested_verification_commands,
+)
 from forge.llm import FunctionCall, ModelResponse
 from forge.trace import TraceRecorder
 from forge.tools import ToolObservation, create_coding_registry
@@ -24,6 +27,33 @@ class ScriptedModelClient:
         if not self.responses:
             raise AssertionError("model called more times than expected")
         return self.responses.pop(0)
+
+
+def test_changed_source_files_receive_deterministic_syntax_suggestions() -> None:
+    python_call = FunctionCall("write_py", "write_file", "{}")
+    python_observation = ToolObservation(
+        "write_py",
+        "write_file",
+        True,
+        {"path": "app.py", "changed_files": ["app.py"]},
+    )
+    javascript_call = FunctionCall("patch_js", "apply_patch", "{}")
+    javascript_observation = ToolObservation(
+        "patch_js",
+        "apply_patch",
+        True,
+        {
+            "applied": True,
+            "changed_files": [{"path": "web/game.js"}],
+        },
+    )
+
+    assert suggested_verification_commands(python_call, python_observation) == (
+        ("python", "-m", "py_compile", "app.py"),
+    )
+    assert suggested_verification_commands(javascript_call, javascript_observation) == (
+        ("node", "--check", "web/game.js"),
+    )
 
 
 def _tool_response(response_id: str, call_id: str, name: str, arguments: dict) -> ModelResponse:
@@ -170,6 +200,89 @@ def test_failed_test_feedback_then_second_patch_is_verified(tmp_path: Path) -> N
         "verification",
         "final",
     } <= set(events)
+
+
+def test_empty_workspace_can_build_multifile_project_and_verify_it(
+    tmp_path: Path,
+) -> None:
+    """Exercise creation, cross-file import, and deterministic verification.
+
+    The scripted client deliberately represents only the provider's decisions.
+    File creation and ``unittest`` execute through the production local tools,
+    so this remains an end-to-end harness regression test without a live API.
+    """
+
+    def create(call_id: str, path: str, content: str) -> ModelResponse:
+        return _tool_response(
+            f"resp_{call_id}",
+            call_id,
+            "create_file",
+            {"path": path, "content": content},
+        )
+
+    model = ScriptedModelClient(
+        [
+            create(
+                "logic",
+                "game_logic.py",
+                "def is_correct(guess: int, secret: int) -> bool:\n"
+                "    return guess == secret\n",
+            ),
+            create(
+                "app",
+                "app.py",
+                "from game_logic import is_correct\n\n"
+                "if __name__ == '__main__':\n"
+                "    print(is_correct(7, 7))\n",
+            ),
+            create(
+                "tests",
+                "test_game_logic.py",
+                "import unittest\n\n"
+                "from game_logic import is_correct\n\n\n"
+                "class GameLogicTests(unittest.TestCase):\n"
+                "    def test_correct_guess(self) -> None:\n"
+                "        self.assertTrue(is_correct(7, 7))\n\n"
+                "    def test_wrong_guess(self) -> None:\n"
+                "        self.assertFalse(is_correct(6, 7))\n\n\n"
+                "if __name__ == '__main__':\n"
+                "    unittest.main()\n",
+            ),
+            create(
+                "readme",
+                "README.md",
+                "# Number guessing\n\nRun `python -m unittest -v`.\n",
+            ),
+            _tool_response(
+                "resp_test",
+                "test",
+                "run_command",
+                {
+                    "command": ["python", "-m", "unittest", "-v"],
+                    "cwd": ".",
+                    "timeout_seconds": 30,
+                },
+            ),
+            _final_response(),
+        ]
+    )
+
+    state = AgentLoop(
+        model,
+        create_coding_registry(tmp_path),
+        max_steps=8,
+    ).run("Build and test a small number guessing CLI.", workspace=tmp_path)
+
+    assert state.status is AgentStatus.COMPLETED
+    assert state.verification_status is VerificationStatus.PASSED
+    assert state.latest_verification is not None
+    assert state.latest_verification.kind == "test"
+    assert "return guess == secret" in (tmp_path / "game_logic.py").read_text(
+        encoding="utf-8"
+    )
+    assert (tmp_path / "app.py").is_file()
+    assert (tmp_path / "test_game_logic.py").is_file()
+    assert (tmp_path / "README.md").is_file()
 
 
 def test_final_claim_without_current_evidence_becomes_incomplete(

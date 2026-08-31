@@ -322,6 +322,134 @@ def test_patch_failure_adds_actionable_recovery_context(tmp_path: Path) -> None:
     assert "Do not repeat the identical patch" in second_input
 
 
+def test_write_file_is_withheld_until_patch_fallback_is_needed(tmp_path: Path) -> None:
+    definition = ToolDefinition(
+        schema=FunctionTool(
+            name="write_file",
+            description="replace file",
+            parameters={"type": "object", "properties": {}},
+        ),
+        handler=lambda _arguments: {"path": "target.py"},
+    )
+    model = QueueModelClient(
+        [
+            _response(
+                "write",
+                calls=(FunctionCall("write_1", "write_file", "{}"),),
+            ),
+            _response("final", text="I need a patch fallback first."),
+        ]
+    )
+
+    state = AgentLoop(model, ToolRegistry([definition]), mode="code").run(
+        "fix it", workspace=tmp_path
+    )
+
+    assert state.status is AgentStatus.COMPLETED
+    assert "write_file" not in [tool.name for tool in model.requests[0].tools]
+    assert state.observations[0].success is False
+    assert "withheld by default" in state.observations[0].content
+
+
+def test_failed_verification_limits_repeated_diagnosis_reads(tmp_path: Path) -> None:
+    registry = ToolRegistry(
+        [
+            ToolDefinition(
+                schema=FunctionTool(
+                    name="run_command",
+                    description="run test",
+                    parameters={"type": "object", "properties": {}},
+                ),
+                handler=lambda _arguments: {
+                    "command": ["pytest", "-q"],
+                    "cwd": ".",
+                    "return_code": 1,
+                    "timed_out": False,
+                    "stdout": "FAILED test_target",
+                    "stderr": "",
+                },
+            ),
+            ToolDefinition(
+                schema=FunctionTool(
+                    name="read_file",
+                    description="read source",
+                    parameters={"type": "object", "properties": {}},
+                ),
+                handler=lambda _arguments: "def broken(): pass",
+            ),
+            ToolDefinition(
+                schema=FunctionTool(
+                    name="apply_patch",
+                    description="patch source",
+                    parameters={"type": "object", "properties": {}},
+                ),
+                handler=lambda _arguments: {"applied": False},
+            ),
+        ]
+    )
+    model = QueueModelClient(
+        [
+            _response("failed", calls=(FunctionCall("test", "run_command", "{}"),)),
+            _response("read_1", calls=(FunctionCall("read_1", "read_file", "{}"),)),
+            _response("read_2", calls=(FunctionCall("read_2", "read_file", "{}"),)),
+            _response("final", text="Need to fix the test failure."),
+        ]
+    )
+
+    state = AgentLoop(model, registry, mode="code", max_steps=4).run(
+        "fix the failing test", workspace=tmp_path
+    )
+
+    assert state.status is AgentStatus.MAX_STEPS
+    assert "read_file" not in [tool.name for tool in model.requests[3].tools]
+    assert "apply_patch" in [tool.name for tool in model.requests[3].tools]
+
+
+def test_length_limited_response_does_not_execute_tool_calls(tmp_path: Path) -> None:
+    definition = ToolDefinition(
+        schema=FunctionTool(
+            name="dangerous_write",
+            description="would mutate a file",
+            parameters={"type": "object", "properties": {}},
+        ),
+        handler=lambda _arguments: pytest.fail("truncated tool call was executed"),
+    )
+    call = FunctionCall("cut_off", "dangerous_write", "{}")
+    truncated = ModelResponse(
+        response_id="truncated",
+        model="test-model",
+        status="length",
+        output_text="",
+        output_items=(),
+        function_calls=(call,),
+        usage=None,
+    )
+    model = QueueModelClient(
+        [truncated, _response("final", text="Please retry the tool call.")]
+    )
+
+    state = AgentLoop(model, ToolRegistry([definition]), mode="code").run(
+        "change a file", workspace=tmp_path
+    )
+
+    assert state.status is AgentStatus.COMPLETED
+    assert state.observations[0].success is False
+    assert "output-length limit" in state.observations[0].content
+    feedback = json.dumps(model.requests[1].input)
+    assert "Tool call was not executed" in feedback
+
+
+def test_code_mode_requests_serial_tool_decisions(tmp_path: Path) -> None:
+    model = QueueModelClient([_response("done", text="Finished")])
+
+    state = AgentLoop(model, _registry(), mode="code").run(
+        "make a change", workspace=tmp_path
+    )
+
+    assert state.status is AgentStatus.COMPLETED
+    assert model.requests[0].parallel_tool_calls is False
+
+
 def test_successful_patch_withholds_next_patch_until_fresh_evidence(
     tmp_path: Path,
 ) -> None:

@@ -2,6 +2,16 @@
 .env
 .env.*
 !.env.example
+api_key.txt
+credentials*.json
+credentials*.toml
+config.local.toml
+*.private.toml
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
 
 # Virtual environments
 .venv/

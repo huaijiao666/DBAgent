@@ -1,7 +1,13 @@
 import json
 from pathlib import Path
 
-from forge.agent import AgentLoop, AgentStatus, TaskMode, resolve_task_mode
+from forge.agent import (
+    AgentLoop,
+    AgentStatus,
+    TaskMode,
+    resolve_task_mode,
+)
+from forge.agent.mode import instructions_for_mode
 from forge.llm import FunctionCall, FunctionTool, ModelResponse
 from forge.tools import ToolDefinition, ToolRegistry
 
@@ -99,6 +105,13 @@ def test_code_mode_keeps_editing_and_plan_tools(tmp_path: Path) -> None:
     names = {tool.name for tool in model.requests[0].tools}
     assert state.mode is TaskMode.CODE
     assert {"apply_patch", "create_file", "update_plan"} <= names
+
+
+def test_code_mode_instructions_preserve_multifile_deliverables() -> None:
+    instructions = instructions_for_mode(TaskMode.CODE)
+
+    assert "multiple files, modules, or assets" in instructions
+    assert "do not silently collapse a multi-file project" in instructions
 
 
 def test_safe_last_turn_forces_text_instead_of_another_tool(tmp_path: Path) -> None:

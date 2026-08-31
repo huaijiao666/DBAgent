@@ -11,7 +11,7 @@ def test_session_store_is_atomic_bounded_and_redacts_secrets(tmp_path: Path) -> 
     store.save(
         {
             "conversation": [
-                {"role": "user", "content": "key=sk-test-secret-value"}
+                {"role": "user", "content": "secret=synthetic-value"}
             ],
             "session_context": {},
         }
@@ -20,8 +20,8 @@ def test_session_store_is_atomic_bounded_and_redacts_secrets(tmp_path: Path) -> 
 
     assert loaded is not None
     assert loaded["version"] == 1
-    assert loaded["conversation"][0]["content"] == "key=[REDACTED]"
-    assert "sk-test-secret-value" not in store.path.read_text(encoding="utf-8")
+    assert loaded["conversation"][0]["content"] == "[REDACTED]"
+    assert "synthetic-value" not in store.path.read_text(encoding="utf-8")
     assert not list(store.path.parent.glob(".session-*.tmp"))
 
     store.save({"conversation": [], "session_context": {"turns": 0}})

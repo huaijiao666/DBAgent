@@ -175,6 +175,52 @@ class VerificationTracker:
         return True
 
 
+def suggested_verification_commands(
+    call: FunctionCall, observation: ToolObservation
+) -> tuple[tuple[str, ...], ...]:
+    """Suggest cheap deterministic checks for files changed by one local edit.
+
+    This is a deterministic rule, not another model decision. It gives a newly
+    created project an immediate syntax check even before it has a test suite,
+    while leaving command selection and execution to the existing Agent loop.
+    Only paths reported by validated local edit tools are considered.
+    """
+
+    if not observation.success or call.name not in {
+        "apply_patch",
+        "create_file",
+        "write_file",
+    }:
+        return ()
+    paths = _changed_paths(observation.content)
+    python_files = tuple(path for path in paths if path.casefold().endswith(".py"))
+    javascript_files = tuple(
+        path
+        for path in paths
+        if path.casefold().endswith((".js", ".mjs", ".cjs"))
+    )
+    commands: list[tuple[str, ...]] = []
+    if python_files:
+        commands.append(("python", "-m", "py_compile", *python_files))
+    commands.extend(("node", "--check", path) for path in javascript_files)
+    return tuple(commands)
+
+
+def _changed_paths(content: object) -> tuple[str, ...]:
+    if not isinstance(content, Mapping):
+        return ()
+    raw_paths = content.get("changed_files")
+    if not isinstance(raw_paths, Sequence) or isinstance(raw_paths, (str, bytes)):
+        path = content.get("path")
+        raw_paths = [path] if isinstance(path, str) else []
+    result: list[str] = []
+    for item in raw_paths:
+        path = item.get("path") if isinstance(item, Mapping) else item
+        if isinstance(path, str) and path and path not in result:
+            result.append(path)
+    return tuple(result)
+
+
 def classify_verification_command(command: Sequence[str]) -> str | None:
     """Return a stable category for common local test/build checks."""
 
