@@ -11,8 +11,10 @@ from forge.llm.provider_policy import (
 def test_provider_policies_keep_reasoning_rules_at_the_transport_boundary() -> None:
     assert OPENAI_RESPONSES_POLICY.replay_chat_reasoning_content is False
     assert COMPATIBLE_CHAT_POLICY.controls_chat_thinking_per_turn is False
-    assert DEEPSEEK_CHAT_POLICY.replay_chat_reasoning_content is True
+    assert DEEPSEEK_CHAT_POLICY.replay_chat_reasoning_content is False
     assert DEEPSEEK_CHAT_POLICY.controls_chat_thinking_per_turn is True
+    assert DEEPSEEK_CHAT_POLICY.supports_reasoning_with_tools is False
+    assert "experimental" in DEEPSEEK_CHAT_POLICY.capability_summary
 
 
 def test_provider_policy_rejects_an_unreviewed_provider_api_pair() -> None:

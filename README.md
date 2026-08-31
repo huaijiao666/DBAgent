@@ -84,6 +84,7 @@ Git、README 或 trace。
 | `FORGE_REASONING_EFFORT` | `medium` | 可选 `none`、`low`、`medium`、`high`、`xhigh`、`max` |
 | `FORGE_API_MODE` | `responses` | `responses` 或 `chat_completions` |
 | `FORGE_BASE_URL` | provider 默认值 | 可选的绝对 `http(s)` base URL |
+| `FORGE_DEEPSEEK_KEY_FILE` | `~/.dba/deepseek_api_key.txt` | DeepSeek 预设使用的 repository 外部 key 文件 |
 
 PowerShell 临时会话示例：
 
@@ -146,16 +147,17 @@ TTY 中自动启用颜色，被重定向到文件或 CI 时保持纯文本。设
 | Model     gpt-5.6-sol                                                   |
 | Budget    12 model turns                                                |
 +-------------------------------------------------------------------------+
-.    0.4s |  1/12 | MODEL request  context=812~tok  tools=12
-->   1.1s |  1/12 | TOOL -> read_file
-OK   1.2s |  1/12 | TOOL <- read_file  ok  path=calculator.py
-#    3.5s |  4/12 | PATCH  files=['calculator.py']  hunks=1
-OK   5.8s |  5/12 | VERIFY  status=passed  kind=test  return_code=0
+.    0.4s |  1/12 | 检查  分析中  context=812/7500~tok  recent=2  compact=0
+->   1.1s |  1/12 | 检查  读取文件  calculator.py
+OK   1.2s |  1/12 | 完成: 读取文件  42 source lines returned  path=calculator.py
+#    3.5s |  4/12 | 修改完成  files=['calculator.py']  hunks=1
+OK   5.8s |  5/12 | 验证 VERIFY  status=passed  kind=test  return_code=0
 
 +-- Run summary ----------------------------------------------------------+
 | Status         VERIFIED                                                 |
 | Steps          5/12                                                     |
 | Verification   passed                                                   |
+| Plan           3/3 steps completed                                      |
 | Elapsed        5.8s                                                     |
 | Files changed  calculator.py                                            |
 +-------------------------------------------------------------------------+
@@ -242,6 +244,8 @@ hint，以及 patch、测试、命令和错误等关键工具 observation；下�
 /mode ask              只做仓库调查和回答，不开放编辑工具
 /mode code             开放规划、patch、命令和验证能力
 /status                查看模型、会话轮数和最近任务状态
+/context               查看最近一次请求的本地 context 预算和压缩统计
+/capabilities          查看当前 provider 实际生效的工具/推理能力
 /plan                  查看当前会话保留的最新结构化 plan
 /sessions              列出当前 workspace 的会话 ID、时间、轮数和验证状态
 /resume <ID>           恢复指定会话
@@ -266,15 +270,16 @@ hint，以及 patch、测试、命令和错误等关键工具 observation；下�
 repository 外，不要提交或复制到 trace。
 
 选择 `/model deepseek-flash` 或 `/model deepseek-pro` 时，DBA 会在**当次
-切换**从 `C:\\AAA\\DBAgent\\api_key.txt` 读取唯一的非空 key 行，并使用
+切换**从配置的 repository 外部 key 文件读取唯一的非空 key 行，并使用
 `https://api.deepseek.com` 的 Chat Completions 兼容接口。该 key 不写入环境、
 session、trace、终端输出或本 repository；切回 `luna`、`terra` 或 `sol` 会恢复
 本次启动时的备份 provider 凭证和 URL。DeepSeek 的两个预设使用显式的
-`deepseek` provider policy，`/reasoning` 仍可在 `none`、`low`、`medium`、`high`、`xhigh`、`max` 间调整。
-为了在本地有预算的多工具 Agent loop 中保持原生 function calling 稳定，执行工具的
-DeepSeek 子轮会自动使用 non-thinking mode；最终的无工具回答轮才使用配置的 thinking
-和 reasoning effort。这样不会要求 harness 无限制地保留 DeepSeek 的私有 reasoning
-链，也不会把文本 DSML 误当作工具调用执行。
+`deepseek` provider policy。由于该兼容接口在 thinking 与多轮工具历史组合下有
+额外协议要求，DBAgent 的本地工具任务会明确显示并强制使用 `thinking disabled`；
+`/reasoning` 只作为偏好保存，不代表 DeepSeek 工具轮实际启用了该能力。这样不会
+把不完整的 `reasoning_content` 当成可恢复的本地上下文，也不会把文本 DSML 误当作
+工具调用执行。DeepSeek 预设应视为 experimental compatibility，重要演示优先使用
+稳定的 Responses provider。
 
 Windows 是默认运行路径。WSL 可以单独安装 Python、editable package 和 provider
 配置，但它不会自动复用 Windows 的 `.venv` 或 Windows 路径；当前项目没有必要
@@ -401,6 +406,10 @@ tests/                              unit、安全和端到端测试
 
 ## 已知限制
 
+- 当前终端是可录制的行式 dashboard，不是全屏 TUI；工具结果只显示脱敏事实摘要，
+  不会把完整源码、stdout 或模型隐藏 reasoning 直接刷屏。执行期间还没有完整的
+  steering/follow-up 输入队列，长任务主要依靠 checkpoint、`/continue` 和
+  `/resume` 恢复。
 - 模型行为和 provider 延迟具有不确定性；即使修复本身简单，任务也可能达到
   `INCOMPLETE`。
 - 第三方 OpenAI-compatible provider 的连接质量、响应延迟、模型语言和 function
@@ -421,6 +430,10 @@ tests/                              unit、安全和端到端测试
   runtime semantics。
 - Verification 识别常见 pytest/compiler/linter 命令；不熟悉的项目命令即使
   执行成功，也可能不会更新 verification tracker。
+- 重复证据检测按工具参数和未变化文件范围做保守判断；它会避免把相同或被完整
+  覆盖的读取算作进展，但不会替代模型对证据是否充分的判断。
+- DeepSeek Chat Completions 兼容路径的 native tool calling 和 thinking 协议仍受
+  provider 行为影响，默认稳定演示应优先选择已验证的 Responses provider。
 - 目前没有 dependency lockfile，因此不能保证完全可复现的依赖解析。
 
 ## License

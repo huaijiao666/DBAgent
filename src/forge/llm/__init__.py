@@ -12,6 +12,7 @@ from forge.llm.errors import (
     ModelConnectionError,
     ModelProtocolError,
     ModelRateLimitError,
+    ModelTextualToolMarkupError,
     ModelTimeoutError,
 )
 from forge.llm.models import (
@@ -31,6 +32,7 @@ __all__ = [
     "ModelConnectionError",
     "ModelProtocolError",
     "ModelRateLimitError",
+    "ModelTextualToolMarkupError",
     "ModelRequest",
     "ModelResponse",
     "ModelTimeoutError",

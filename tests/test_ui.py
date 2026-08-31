@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from forge.agent import AgentStatus
 from forge.agent.verification import VerificationStatus
+from forge.llm.provider_policy import DEEPSEEK_CHAT_POLICY
 from forge.ui import TerminalUI
 
 
@@ -65,6 +66,17 @@ def test_terminal_ui_formats_trace_events_without_ansi() -> None:
     assert "VERIFY" in verification
     assert "status=passed" in verification
     assert "\x1b[" not in request
+
+
+def test_terminal_ui_exposes_active_provider_limitations() -> None:
+    stream = io.StringIO()
+    ui = TerminalUI(stream=stream, color=False)
+    ui.render_capabilities(DEEPSEEK_CHAT_POLICY)
+
+    output = stream.getvalue()
+    assert "Provider capabilities" in output
+    assert "tool reasoning disabled" in output
+    assert "experimental compatibility" in output
 
 
 def test_terminal_ui_wraps_important_status_instead_of_truncating() -> None:
@@ -189,6 +201,29 @@ def test_terminal_ui_shows_non_patch_tool_failure_reason() -> None:
 
     assert "失败: 创建文件" in rendered
     assert "parent directory does not exist" in rendered
+
+
+def test_terminal_ui_shows_safe_tool_result_facts() -> None:
+    ui = TerminalUI(stream=io.StringIO(), color=False)
+    ui.start(task="task", workspace=Path("."), model="model", max_steps=3)
+
+    rendered = ui.render_event(
+        {
+            "elapsed_ms": 400,
+            "step": 1,
+            "event": "tool_result",
+            "payload": {
+                "tool_name": "read_file",
+                "success": True,
+                "path": "app.py",
+                "result_summary": "18 source lines returned",
+            },
+        }
+    )
+
+    assert "完成: 读取文件" in rendered
+    assert "18 source lines returned" in rendered
+    assert "path=app.py" in rendered
 
 
 def test_terminal_ui_shows_context_compaction_and_plan_progress() -> None:

@@ -2,17 +2,18 @@ import io
 from pathlib import Path
 from types import SimpleNamespace
 
-from forge.agent import AgentStatus, PlanStep, PlanStepStatus, TaskPlan
+from forge.agent import AgentStatus, ContextBudget, PlanStep, PlanStepStatus, TaskPlan
 from forge.agent.verification import VerificationStatus
 from forge.config import ForgeConfig
 from forge.llm import ModelCommunicationError
-from forge.repl import ForgeRepl
+from forge.repl import ForgeRepl, _default_context_budget
 from forge.tools import ToolObservation
 
 
 class _FakeLoop:
     calls: list[tuple[str, Path]] = []
     initial_plans: list[TaskPlan | None] = []
+    budgets: list[ContextBudget] = []
 
     def __init__(
         self,
@@ -30,6 +31,7 @@ class _FakeLoop:
         self.max_steps = max_steps
         self.mode = mode
         self.context_budget = context_budget
+        self.budgets.append(context_budget)
         self.trace = trace
         self.initial_plans.append(initial_plan)
 
@@ -64,6 +66,55 @@ class _FakeLoop:
             step=1,
             max_steps=self.max_steps,
         )
+
+
+def test_deepseek_repl_profile_reserves_context_for_tool_schema() -> None:
+    budget = _default_context_budget(
+        ForgeConfig(
+            openai_api_key="fake-token",
+            model="deepseek-v4-flash",
+            reasoning_effort="high",
+            base_url="https://api.deepseek.com",
+            api_mode="chat_completions",
+            provider="deepseek",
+        )
+    )
+
+    assert budget.max_context_characters == 24_000
+    assert budget.max_single_observation_characters == 3_000
+    assert budget.recent_observation_count == 2
+
+
+def test_default_repl_profile_preserves_existing_large_context() -> None:
+    budget = _default_context_budget(ForgeConfig(openai_api_key="fake-token"))
+
+    assert budget.max_context_characters == 80_000
+    assert budget.max_task_characters == 30_000
+
+
+def test_model_switch_uses_the_deepseek_context_profile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    key_file = tmp_path / "deepseek-key.txt"
+    key_file.write_text("test-key\n", encoding="utf-8")
+    config = ForgeConfig(openai_api_key="configured-key")
+    monkeypatch.setattr("forge.repl.load_repl_config", lambda _path: config)
+    monkeypatch.setattr("forge.repl.AgentLoop", _FakeLoop)
+    _FakeLoop.calls = []
+    _FakeLoop.initial_plans = []
+    _FakeLoop.budgets = []
+    inputs = iter(["/model deepseek-flash", "inspect files", "/exit"])
+    repl = ForgeRepl(
+        workspace=tmp_path,
+        input_function=lambda _prompt: next(inputs),
+        stream=io.StringIO(),
+        model_factory=lambda _config: object(),
+        registry_factory=lambda _workspace: object(),
+        deepseek_key_file=key_file,
+    )
+
+    assert repl.run() == 0
+    assert _FakeLoop.budgets[-1].max_context_characters == 24_000
 
 
 def test_repl_keeps_local_history_and_handles_commands(

@@ -8,6 +8,7 @@ that only exposes ``/chat/completions`` can still participate in the same agent 
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
@@ -27,6 +28,7 @@ from forge.llm.errors import (
     ModelConnectionError,
     ModelProtocolError,
     ModelRateLimitError,
+    ModelTextualToolMarkupError,
     ModelTimeoutError,
 )
 from forge.llm.models import (
@@ -112,6 +114,7 @@ class OpenAIChatCompletionsClient:
                     "Chat Completions provider returned an unsuccessful status",
                     status_code=status_code,
                     request_id=request_id,
+                    body=getattr(error, "body", None),
                 ),
                 status_code=status_code,
                 request_id=request_id,
@@ -119,7 +122,10 @@ class OpenAIChatCompletionsClient:
         except APIError as error:
             raise ModelAPIError("Chat Completions request failed") from error
 
-        return self._normalize_response(response)
+        return self._normalize_response(
+            response,
+            retain_reasoning=self._policy.replay_chat_reasoning_content,
+        )
 
     def _build_parameters(self, request: ModelRequest) -> dict[str, Any]:
         tools: list[dict[str, Any]] = []
@@ -140,6 +146,12 @@ class OpenAIChatCompletionsClient:
 
         messages = responses_items_to_chat_messages(
             request.input,
+            # A local Coding Agent must not mix DeepSeek thinking and
+            # non-thinking requests in one transcript: after thinking is
+            # enabled, the provider requires every prior reasoning_content
+            # value to be replayed verbatim. That hidden, unbounded state would
+            # violate Forge's local context budget. The reviewed DeepSeek
+            # policy therefore retains no provider-private reasoning content.
             replay_reasoning_content=self._policy.replay_chat_reasoning_content,
             require_assistant_content_for_tool_calls=(
                 self._policy.requires_assistant_content_for_tool_calls
@@ -158,22 +170,20 @@ class OpenAIChatCompletionsClient:
             # OpenAI-compatible third-party providers.
             parameters["max_tokens"] = request.max_output_tokens
         if self._policy.controls_chat_thinking_per_turn:
-            # DeepSeek requires full reasoning_content replay on every later
-            # tool-turn request. A locally budgeted coding agent cannot safely
-            # retain an unbounded chain of that private provider state, so use
-            # native non-thinking function calls while tools are executable.
-            # The final no-tool turn may still use the configured effort.
-            thinking_type = (
-                "disabled" if provider_tools else "enabled"
-            )
-            parameters["extra_body"] = {"thinking": {"type": thinking_type}}
+            # Keep one coherent protocol for the *entire* locally-owned task,
+            # including the final no-tool response. Re-enabling thinking only
+            # for finalization causes HTTP 400 because previous tool-turn
+            # assistant messages have no DeepSeek reasoning_content to replay.
+            parameters["extra_body"] = {"thinking": {"type": "disabled"}}
         if provider_tools:
             parameters["tools"] = provider_tools
             parameters["tool_choice"] = request.tool_choice
             parameters["parallel_tool_calls"] = request.parallel_tool_calls
         return parameters
 
-    def _normalize_response(self, response: Any) -> ModelResponse:
+    def _normalize_response(
+        self, response: Any, *, retain_reasoning: bool
+    ) -> ModelResponse:
         response_id = _required_string(response, "id", "chat completion")
         choices = _read(response, "choices")
         if not isinstance(choices, Sequence) or isinstance(choices, (str, bytes)):
@@ -194,7 +204,7 @@ class OpenAIChatCompletionsClient:
             # Textual markup is not a function call. Executing it would bypass
             # the tool schema/dispatch boundary, so fail clearly instead of
             # presenting it as a final assistant answer.
-            raise ModelProtocolError(
+            raise ModelTextualToolMarkupError(
                 "Chat provider returned textual DSML tool markup instead of "
                 "native function calls; no tool was executed"
             )
@@ -211,7 +221,7 @@ class OpenAIChatCompletionsClient:
 
         function_calls: list[FunctionCall] = []
         output_items: list[dict[str, Any]] = []
-        if reasoning_content and self._policy.replay_chat_reasoning_content:
+        if reasoning_content and retain_reasoning:
             # DeepSeek requires this value to be replayed alongside an
             # assistant tool-call message in thinking mode. It is retained in
             # the locally-owned context only; it is not printed as an answer.
@@ -448,16 +458,45 @@ def _unwrap_compatibility_arguments(arguments_json: str) -> str:
 
 
 def _provider_status_message(
-    prefix: str, *, status_code: object, request_id: object
+    prefix: str, *, status_code: object, request_id: object, body: object = None
 ) -> str:
-    """Expose safe debugging identifiers without logging response bodies."""
+    """Expose a bounded, redacted provider diagnostic without logging bodies."""
 
     details: list[str] = []
     if isinstance(status_code, int):
         details.append(f"HTTP {status_code}")
     if isinstance(request_id, str) and request_id:
         details.append(f"request_id={request_id}")
+    detail = _safe_provider_error_detail(body)
+    if detail:
+        details.append(detail)
     return prefix if not details else f"{prefix} ({', '.join(details)})"
+
+
+def _safe_provider_error_detail(body: object) -> str:
+    """Extract only standard error metadata and redact likely credentials."""
+
+    payload = body.get("error", body) if isinstance(body, Mapping) else None
+    if not isinstance(payload, Mapping):
+        return ""
+    parts: list[str] = []
+    for key in ("type", "code", "message"):
+        value = payload.get(key)
+        if isinstance(value, (str, int, float)) and str(value).strip():
+            text = _redact_provider_detail(str(value).strip())
+            if text:
+                parts.append(f"{key}={text}")
+    return "; ".join(parts)[:360]
+
+
+def _redact_provider_detail(value: str) -> str:
+    value = re.sub(
+        r"(?i)(api[_ -]?key|authorization|bearer)\s*[:=]\s*\S+",
+        r"\1=[redacted]",
+        value,
+    )
+    value = re.sub(r"\bsk-[A-Za-z0-9_-]+", "[redacted]", value)
+    return " ".join(value.split())[:220]
 
 
 def _normalize_chat_usage(usage: Any) -> TokenUsage | None:

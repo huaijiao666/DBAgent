@@ -302,7 +302,40 @@ def test_repository_and_read_results_update_their_context_categories() -> None:
     context_message = str(snapshot.input_items[1]["content"])
 
     assert "src/app.py" in context_message
-    assert "read_symbol: app.py::main@1" in context_message
-    assert "def main" in context_message
-    assert "return 0" in context_message
-    assert "y" * 10_000 not in context_message
+    # The latest tool output is represented once as a native function output,
+    # not duplicated in the text snapshot's working-code section.
+    assert "read_symbol: app.py::main@1" not in context_message
+    output = next(
+        item
+        for item in snapshot.input_items
+        if item.get("type") == "function_call_output"
+        and item.get("call_id") == "call_symbol"
+    )
+    assert "def main" in output["output"]
+    assert "return 0" in output["output"]
+    assert "y" * 10_000 not in json.dumps(snapshot.input_items)
+
+
+def test_recent_read_is_not_duplicated_in_working_code_snapshot() -> None:
+    manager = ContextManager("Inspect a large source file")
+    call = _call("call_read", "read_file", {"path": "src/app.py"})
+    _record(
+        manager,
+        "resp_read",
+        call,
+        ToolObservation(
+            call_id=call.call_id,
+            tool_name=call.name,
+            success=True,
+            content="def important_function():\n    return 42\n",
+        ),
+    )
+
+    snapshot = manager.build_context(step=2)
+    text_snapshot = str(snapshot.input_items[1]["content"])
+    output = next(
+        item for item in snapshot.input_items if item.get("type") == "function_call_output"
+    )
+
+    assert "important_function" not in text_snapshot
+    assert "important_function" in output["output"]

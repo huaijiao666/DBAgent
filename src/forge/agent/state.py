@@ -22,6 +22,9 @@ class AgentStatus(str, Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     MAX_STEPS = "max_steps"
+    ERROR = "error"
+    ABORTED = "aborted"
+    BLOCKED = "blocked"
 
 
 @dataclass(slots=True)

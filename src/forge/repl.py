@@ -31,7 +31,7 @@ from forge.llm import (
     OpenAIResponsesClient,
 )
 from forge.model_presets import (
-    DEFAULT_DEEPSEEK_KEY_FILE,
+    default_deepseek_key_file,
     model_presets,
     resolve_model_selection,
 )
@@ -46,6 +46,37 @@ from forge.workspace import Workspace
 
 InputFunction = Callable[[str], str]
 ModelFactory = Callable[[ForgeConfig], Any]
+
+
+def _default_context_budget(config: ForgeConfig) -> ContextBudget:
+    """Return a local context cap with room for provider prompt overhead.
+
+    Chat-Completions compatible routes can impose a lower effective input limit
+    than the advertised model context window. DeepSeek's tool schema and
+    system prompt consume a material part of that limit on every request, so
+    leave a deterministic margin instead of waiting for an HTTP 400 response.
+    This only controls locally-owned history; it never uses provider-side
+    conversation state.
+    """
+
+    if config.provider == "deepseek":
+        return ContextBudget(
+            max_context_characters=24_000,
+            max_task_characters=8_000,
+            max_plan_characters=3_000,
+            max_repository_map_characters=4_000,
+            max_relevant_code_characters=6_000,
+            max_compact_observations_characters=4_000,
+            max_recent_observations_characters=8_000,
+            max_single_observation_characters=3_000,
+            max_call_arguments_characters=1_000,
+            recent_observation_count=2,
+            max_verification_characters=2_000,
+            max_runtime_guidance_characters=2_000,
+        )
+    # Leave enough task budget for both local chat history and structured
+    # session state before ContextManager applies its total context cap.
+    return ContextBudget(max_task_characters=30_000)
 
 
 @dataclass(slots=True)
@@ -125,7 +156,7 @@ class ForgeRepl:
         config_path: Path | None = None,
         model_override: str | None = None,
         reasoning_effort_override: str | None = None,
-        deepseek_key_file: Path = DEFAULT_DEEPSEEK_KEY_FILE,
+        deepseek_key_file: Path | None = None,
         mode: TaskMode | str = TaskMode.AUTO,
         discovery: WorkspaceDiscovery | None = None,
         context_budget: ContextBudget | None = None,
@@ -145,14 +176,14 @@ class ForgeRepl:
             reasoning_effort_override,
             "reasoning_effort_override",
         )
-        self.deepseek_key_file = deepseek_key_file
+        self.deepseek_key_file = deepseek_key_file or default_deepseek_key_file()
         self._mode = mode if isinstance(mode, TaskMode) else TaskMode(mode)
         self._discovery = discovery
-        # Leave enough task budget for both local chat history and structured
-        # session state before ContextManager applies its total context cap.
-        self.context_budget = context_budget or ContextBudget(
-            max_task_characters=30_000,
-        )
+        self._has_explicit_context_budget = context_budget is not None
+        # An explicitly supplied budget is useful for tests and advanced local
+        # embedding. Otherwise the selected provider determines the safe
+        # default after configuration has been loaded in ``run``.
+        self.context_budget = context_budget
         self.input_function = input_function or input
         self.stream = stream or sys.stdout
         self._model_factory = model_factory or _create_model_client
@@ -176,6 +207,8 @@ class ForgeRepl:
                 model=self.model_override,
                 reasoning_effort=self.reasoning_effort_override,
             )
+            if not self._has_explicit_context_budget:
+                self.context_budget = _default_context_budget(config)
             # Keep the credential-bearing startup configuration only in memory.
             # Named configured presets restore it after a DeepSeek switch.
             self._startup_config = config
@@ -193,6 +226,15 @@ class ForgeRepl:
                     self._discovery.start if self._discovery is not None else None
                 ),
             )
+            try:
+                active_policy = provider_policy(
+                    provider=config.provider,
+                    api_mode=config.api_mode,
+                )
+                ui.info(f"Provider capabilities: {active_policy.capability_summary}")
+            except ValueError:
+                # The model factory below will provide the authoritative error.
+                pass
             trace = TraceRecorder(
                 trace_path,
                 workspace=self.workspace,
@@ -457,6 +499,17 @@ class ForgeRepl:
         if command == "status":
             self._render_status(config, ui)
             return True, config, model_client
+        if command == "context":
+            ui.render_context(self._last_state)
+            return True, config, model_client
+        if command == "capabilities":
+            try:
+                ui.render_capabilities(
+                    provider_policy(provider=config.provider, api_mode=config.api_mode)
+                )
+            except ValueError as error:
+                ui.error(str(error))
+            return True, config, model_client
         if command == "steps":
             if not argument:
                 ui.info(
@@ -525,14 +578,21 @@ class ForgeRepl:
             except (ConfigurationError, ModelCommunicationError) as error:
                 ui.error(str(error))
                 return True, config, model_client
+            if not self._has_explicit_context_budget:
+                self.context_budget = _default_context_budget(next_config)
             ui.info(f"Model changed to {next_config.model} for the next turn.")
+            ui.info(
+                "Local context profile: "
+                f"{self.context_budget.max_context_characters // 1_000}k characters."
+            )
             policy = provider_policy(
                 provider=next_config.provider, api_mode=next_config.api_mode
             )
+            ui.info(f"Provider capabilities: {policy.capability_summary}")
             if policy.controls_chat_thinking_per_turn:
                 ui.info(
-                    "DeepSeek uses native non-thinking mode during executable "
-                    "tool turns; configured reasoning applies to no-tool final turns."
+                    "DeepSeek keeps thinking disabled for this entire local agent "
+                    "task, including finalization, to keep tool history valid."
                 )
             return True, next_config, next_client
         if command == "models":
@@ -570,6 +630,11 @@ class ForgeRepl:
                 ui.error(str(error))
                 return True, config, model_client
             ui.info(f"Reasoning effort changed to {effort} for the next turn.")
+            if next_config.provider == "deepseek":
+                ui.info(
+                    "DeepSeek reasoning is stored as a preference but remains "
+                    "disabled during DBA tool tasks for protocol compatibility."
+                )
             return True, next_config, next_client
 
         ui.error(f"Unknown command '/{command}'. Type /help for available commands.")
@@ -645,14 +710,16 @@ class ForgeRepl:
 
     def _render_status(self, config: ForgeConfig, ui: TerminalUI) -> None:
         if self._last_state is None:
+            ui.info("Session status")
             ui.info(
-                f"session={self._session_id}; model={config.model}; provider={config.provider}; api={config.api_mode}; "
-                f"reasoning={config.reasoning_effort}; "
-                f"task_mode={self._mode.value}; "
-                f"step_budget={self.max_steps}; "
-                f"turns={self._conversation.turn_count}; "
-                f"{self._session_context.status_line()}; no task run yet"
+                f"session={self._session_id}; model={config.model}; "
+                f"provider={config.provider}; api={config.api_mode}"
             )
+            ui.info(
+                f"reasoning={config.reasoning_effort}; task_mode={self._mode.value}; "
+                f"step_budget={self.max_steps}; turns={self._conversation.turn_count}"
+            )
+            ui.info(f"{self._session_context.status_line()}; no task run yet")
             return
         state = self._last_state
         verification = getattr(
@@ -667,14 +734,18 @@ class ForgeRepl:
                 f"context={latest.approximate_tokens}~tok; "
                 f"compacted={latest.compacted_observations}"
             )
+        ui.info("Session status")
         ui.info(
-            f"session={self._session_id}; model={config.model}; provider={config.provider}; api={config.api_mode}; "
-            f"reasoning={config.reasoning_effort}; "
-            f"task_mode={self._mode.value}; "
-            f"step_budget={self.max_steps}; "
-            f"turns={self._conversation.turn_count}; "
-            f"last_status={status}; verification={verification}; "
-            f"{context}; {self._session_context.status_line()}"
+            f"session={self._session_id}; model={config.model}; "
+            f"provider={config.provider}; api={config.api_mode}"
+        )
+        ui.info(
+            f"reasoning={config.reasoning_effort}; task_mode={self._mode.value}; "
+            f"step_budget={self.max_steps}; turns={self._conversation.turn_count}"
+        )
+        ui.info(
+            f"last_status={status}; verification={verification}; {context}; "
+            f"{self._session_context.status_line()}"
         )
 
 

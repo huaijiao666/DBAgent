@@ -4,12 +4,14 @@ from pathlib import Path
 import pytest
 
 from forge.agent import AgentLoop, AgentStatus, ContextBudget
+from forge.agent.loop import _safe_command
 from forge.llm import (
     FunctionCall,
     FunctionTool,
     ModelConnectionError,
     ModelAPIError,
     ModelProtocolError,
+    ModelTextualToolMarkupError,
     ModelResponse,
 )
 from forge.tools import ToolDefinition, ToolRegistry, ToolResult
@@ -107,6 +109,12 @@ def test_normal_termination_without_tool_call(tmp_path: Path) -> None:
     assert state.context_usage[0].input_characters <= 48_000
 
 
+def test_safe_command_redacts_common_secret_arguments() -> None:
+    assert _safe_command(
+        ["python", "-m", "tool", "--api-key", "secret", "--token=other"]
+    ) == ["python", "-m", "tool", "--api-key", "[REDACTED]", "--token=[REDACTED]"]
+
+
 def test_transient_model_error_is_retried_without_consuming_an_agent_step(
     tmp_path: Path,
 ) -> None:
@@ -190,6 +198,94 @@ def test_non_retryable_model_error_is_not_retried_and_is_traced(
         "model_error",
         "final",
     ]
+
+
+def test_textual_tool_markup_is_retried_as_required_native_call(
+    tmp_path: Path,
+) -> None:
+    class DSMLThenNativeModel:
+        def __init__(self) -> None:
+            self.requests = []
+
+        def create_response(self, request):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                raise ModelTextualToolMarkupError("textual DSML was rejected")
+            if len(self.requests) == 2:
+                return _response("native", calls=(_call("call_1"),))
+            return _response("final", text="Recovered with a native call.")
+
+    model = DSMLThenNativeModel()
+    state = AgentLoop(
+        model,
+        _registry(),
+        max_steps=2,
+        mode="code",
+        max_model_retries=1,
+    ).run("inspect", workspace=tmp_path)
+
+    assert state.status is AgentStatus.COMPLETED
+    assert len(model.requests) == 3
+    repaired_request = model.requests[1]
+    assert repaired_request.tool_choice == "required"
+    assert repaired_request.parallel_tool_calls is False
+    assert "textual tool-call markup" in repaired_request.instructions
+
+
+def test_textual_markup_on_finalization_retries_without_tool_history(
+    tmp_path: Path,
+) -> None:
+    class DSMLThenFinalModel:
+        def __init__(self) -> None:
+            self.requests = []
+
+        def create_response(self, request):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                raise ModelTextualToolMarkupError("textual DSML was rejected")
+            return _response("final", text="Final answer without a tool call.")
+
+    model = DSMLThenFinalModel()
+    state = AgentLoop(
+        model,
+        _registry(),
+        max_steps=1,
+        mode="code",
+        max_model_retries=1,
+    ).run("inspect", workspace=tmp_path)
+
+    assert state.status is AgentStatus.COMPLETED
+    assert len(model.requests) == 2
+    repaired_request = model.requests[1]
+    assert repaired_request.tool_choice == "none"
+    assert "final answer now" in repaired_request.instructions
+    assert all(
+        item.get("type") not in {"function_call", "function_call_output"}
+        for item in repaired_request.input
+    )
+
+
+def test_textual_tool_markup_repairs_are_bounded(tmp_path: Path) -> None:
+    class AlwaysTextualMarkupModel:
+        attempts = 0
+
+        def create_response(self, _request):
+            self.attempts += 1
+            raise ModelTextualToolMarkupError("textual DSML was rejected")
+
+    model = AlwaysTextualMarkupModel()
+    with pytest.raises(ModelTextualToolMarkupError):
+        AgentLoop(
+            model,
+            _registry(),
+            max_steps=1,
+            mode="code",
+            max_model_retries=4,
+        ).run("inspect", workspace=tmp_path)
+
+    # Two safe transport repairs, then a clear failure rather than executing text
+    # or spending all generic retry attempts on a deterministic protocol violation.
+    assert model.attempts == 3
 
 
 def test_transient_provider_api_error_is_retried(tmp_path: Path) -> None:
@@ -351,6 +447,35 @@ def test_write_file_is_withheld_until_patch_fallback_is_needed(tmp_path: Path) -
     assert "withheld by default" in state.observations[0].content
 
 
+def test_existing_create_file_adds_patch_oriented_recovery_hint(tmp_path: Path) -> None:
+    definition = ToolDefinition(
+        schema=FunctionTool(
+            name="create_file",
+            description="create file",
+            parameters={"type": "object", "properties": {}},
+        ),
+        handler=lambda _arguments: (_ for _ in ()).throw(
+            FileExistsError("path already exists: app.py")
+        ),
+    )
+    model = QueueModelClient(
+        [
+            _response(
+                "create",
+                calls=(FunctionCall("create_1", "create_file", "{}"),),
+            ),
+            _response("final", text="I will patch the existing file."),
+        ]
+    )
+
+    state = AgentLoop(model, ToolRegistry([definition]), mode="code").run(
+        "create a file", workspace=tmp_path
+    )
+
+    assert state.status is AgentStatus.COMPLETED
+    assert any("create_file never overwrites" in hint for hint in state.recovery_hints)
+
+
 def test_failed_verification_limits_repeated_diagnosis_reads(tmp_path: Path) -> None:
     registry = ToolRegistry(
         [
@@ -405,6 +530,70 @@ def test_failed_verification_limits_repeated_diagnosis_reads(tmp_path: Path) -> 
     assert "apply_patch" in [tool.name for tool in model.requests[3].tools]
 
 
+def test_overlapping_read_ranges_are_not_counted_as_new_progress(
+    tmp_path: Path,
+) -> None:
+    class Events:
+        def __init__(self) -> None:
+            self.items = []
+
+        def record(self, event, *, step, payload=None):
+            self.items.append((event, step, payload or {}))
+
+    registry = ToolRegistry(
+        [
+            ToolDefinition(
+                schema=FunctionTool(
+                    name="read_file",
+                    description="read source",
+                    parameters={"type": "object", "properties": {}},
+                ),
+                handler=lambda _arguments: "1: def answer():\n2:     return 42",
+            )
+        ]
+    )
+    model = QueueModelClient(
+        [
+            _response(
+                "read_1",
+                calls=(
+                    FunctionCall(
+                        "read_1",
+                        "read_file",
+                        json.dumps({"path": "app.py", "start_line": 1, "end_line": 20}),
+                    ),
+                ),
+            ),
+            _response(
+                "read_2",
+                calls=(
+                    FunctionCall(
+                        "read_2",
+                        "read_file",
+                        json.dumps({"path": "app.py", "start_line": 5, "end_line": 10}),
+                    ),
+                ),
+            ),
+            _response("final", text="The file contains the answer function."),
+        ]
+    )
+    trace = Events()
+
+    state = AgentLoop(model, registry, mode="ask", max_steps=4, trace=trace).run(
+        "inspect the repository", workspace=tmp_path
+    )
+
+    assert state.status is AgentStatus.COMPLETED
+    assert state.no_progress_rounds == 1
+    duplicate_results = [
+        payload
+        for event, _step, payload in trace.items
+        if event == "tool_result" and payload.get("duplicate_evidence")
+    ]
+    assert duplicate_results
+    assert any("repeating evidence" in hint for hint in state.recovery_hints)
+
+
 def test_length_limited_response_does_not_execute_tool_calls(tmp_path: Path) -> None:
     definition = ToolDefinition(
         schema=FunctionTool(
@@ -444,6 +633,19 @@ def test_code_mode_requests_serial_tool_decisions(tmp_path: Path) -> None:
 
     state = AgentLoop(model, _registry(), mode="code").run(
         "make a change", workspace=tmp_path
+    )
+
+    assert state.status is AgentStatus.COMPLETED
+    assert model.requests[0].parallel_tool_calls is False
+
+
+def test_ask_mode_requests_serial_tool_decisions_for_provider_compatibility(
+    tmp_path: Path,
+) -> None:
+    model = QueueModelClient([_response("done", text="Finished")])
+
+    state = AgentLoop(model, _registry(), mode="ask").run(
+        "inspect this repository", workspace=tmp_path
     )
 
     assert state.status is AgentStatus.COMPLETED

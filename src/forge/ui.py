@@ -6,6 +6,7 @@ import os
 import sys
 import textwrap
 import time
+import unicodedata
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +33,7 @@ class TerminalUI:
         "muted": "\x1b[90m",
         "magenta": "\x1b[35m",
     }
+    _BOX_WIDTH = 76
 
     def __init__(
         self,
@@ -71,19 +73,17 @@ class TerminalUI:
         self._session_state = session_state
         self._write("")
         self._write(self._paint("+-- DBAgent " + "-" * 65 + "+", "blue"))
-        self._write("| Local coding agent | repository-aware | self-verifying".ljust(77) + "|")
-        self._write(f"| Workspace {_truncate(str(workspace), 70):<70} |")
-        self._write(f"| Model     {_truncate(model, 70):<70} |")
-        self._write(f"| API mode  {_truncate(api_mode, 70):<70} |")
-        self._write(f"| Task mode {_truncate(mode, 70):<70} |")
+        self._write(_box_row("Local coding agent | repository-aware | self-verifying"))
+        self._write(_box_row(f"Workspace {_truncate(str(workspace), 70)}"))
+        self._write(_box_row(f"Model     {_truncate(model, 70)}"))
+        self._write(_box_row(f"API mode  {_truncate(api_mode, 70)}"))
+        self._write(_box_row(f"Task mode {_truncate(mode, 70)}"))
         session_label = f"{session_id or 'not saved yet'} [{session_state}]"
-        self._write(f"| Session   {_truncate(session_label, 70):<70} |")
+        self._write(_box_row(f"Session   {_truncate(session_label, 70)}"))
         if launch_directory is not None and launch_directory != workspace:
-            self._write(
-                f"| Started   {_truncate(str(launch_directory), 70):<70} |"
-            )
-            self._write("| Project root was detected automatically.                              |")
-        self._write("| /help commands | /sessions history | /status current state           |")
+            self._write(_box_row(f"Started   {_truncate(str(launch_directory), 70)}"))
+            self._write(_box_row("Project root was detected automatically."))
+        self._write(_box_row("/help commands | /sessions history | /status current state"))
         self._write(self._paint("+" + "-" * 76 + "+", "blue"))
         self._write("")
 
@@ -125,6 +125,8 @@ class TerminalUI:
         self._write("  /steps [N]     show or set the maximum model turns per task")
         self._write("  /mode [auto|ask|code]  show or change task authority")
         self._write("  /status        show session, context, and latest task status")
+        self._write("  /context       show the latest local context budget and compaction")
+        self._write("  /capabilities  show active provider capabilities and limitations")
         self._write("  /plan          show the latest retained task plan")
         self._write("  /sessions      list resumable sessions in this workspace")
         self._write("  /resume <ID>   restore a specific session (/resume latest also works)")
@@ -133,6 +135,34 @@ class TerminalUI:
         self._write("  /clear         delete only the current saved conversation")
         self._write("  /help          show this help")
         self._write("  /exit          leave DBA")
+
+    def render_context(self, state: Any | None) -> None:
+        """Render local context facts without dumping prompt contents."""
+
+        self._write("")
+        self._write(self._paint("Local context", "magenta"))
+        if state is None or not getattr(state, "context_usage", None):
+            self._write("  No completed Agent run in this session.")
+            return
+        usage = state.context_usage[-1]
+        self._write(
+            "  latest="
+            f"{usage.approximate_tokens}~tok / {usage.budget_characters // 4}~tok "
+            f"({usage.input_characters} chars)"
+        )
+        self._write(
+            "  observations="
+            f"recent {usage.recent_observations}, compacted {usage.compacted_observations}, "
+            f"truncated {usage.truncated_items}"
+        )
+
+    def render_capabilities(self, policy: Any) -> None:
+        """Render provider behavior that is actually active for this session."""
+
+        self._write("")
+        self._write(self._paint("Provider capabilities", "magenta"))
+        self._write(f"  {getattr(policy, 'capability_summary', policy)}")
+        self._write(f"  tool turns: {getattr(policy, 'tool_turn_policy', 'unknown')}")
 
     def render_model_options(self, presets: Sequence[Any], *, current_model: str) -> None:
         """Render short aliases without disclosing any provider credentials."""
@@ -178,11 +208,11 @@ class TerminalUI:
         self._mode = mode
         self._write("")
         self._write(self._paint("+-- DBAgent coding session " + "-" * 50 + "+", "blue"))
-        self._write(f"| Task      {_truncate(task, 70):<70} |")
-        self._write(f"| Workspace {_truncate(str(workspace), 70):<70} |")
-        self._write(f"| Model     {_truncate(model, 70):<70} |")
-        self._write(f"| Mode      {_truncate(mode, 70):<70} |")
-        self._write(f"| Budget    {max_steps} model turns{' ' * max(0, 57 - len(str(max_steps)))} |")
+        self._write(_box_row(f"Task      {_truncate(task, 70)}"))
+        self._write(_box_row(f"Workspace {_truncate(str(workspace), 70)}"))
+        self._write(_box_row(f"Model     {_truncate(model, 70)}"))
+        self._write(_box_row(f"Mode      {_truncate(mode, 70)}"))
+        self._write(_box_row(f"Budget    {max_steps} model turns"))
         self._write(self._paint("+" + "-" * 76 + "+", "blue"))
         self._write("")
 
@@ -199,6 +229,8 @@ class TerminalUI:
         if event == "verification" and payload.get("status") == "failed":
             symbol, tone = "!!", "red"
         prefix = self._paint(f"{symbol} {elapsed:>6} | {step!s:>2}/{self._max_steps or '?'} |", tone)
+        phase = _phase_label(payload.get("phase"))
+        phase_prefix = f"{phase}  " if phase else ""
 
         if event == "run_started":
             detail = (
@@ -206,7 +238,7 @@ class TerminalUI:
                 f"tools={payload.get('tool_count')}"
             )
         elif event == "assistant_update":
-            detail = "AGENT  " + _truncate(str(payload.get("text", "")), 90)
+            detail = "AGENT 进度  " + _truncate(str(payload.get("text", "")), 110)
         elif event == "model_request":
             usage = payload.get("context_usage", {})
             approximate_tokens = usage.get("approximate_tokens", "?")
@@ -217,7 +249,7 @@ class TerminalUI:
                 else "?"
             )
             detail = (
-                "分析中  "
+                f"{phase_prefix}分析中  "
                 f"context={approximate_tokens}/{budget_tokens}~tok  "
                 f"recent={usage.get('recent_observations', 0)}  "
                 f"compact={usage.get('compacted_observations', 0)}"
@@ -230,7 +262,7 @@ class TerminalUI:
                 else ""
             )
             detail = (
-                "模型响应  "
+                f"{phase_prefix}模型响应  "
                 f"status={payload.get('status')}  "
                 f"calls={payload.get('function_call_count')}{tokens}"
             )
@@ -249,10 +281,18 @@ class TerminalUI:
             )
         elif event == "tool_start":
             detail = _human_tool_start(payload)
+            if payload.get("intent"):
+                detail = f"{payload['intent']}  {detail}"
+            if payload.get("evidence_status") == "duplicate":
+                detail = "重复证据  " + detail
             if payload.get("plan_step"):
                 detail = f"[{payload['plan_step']}]  {detail}"
         elif event == "tool_result":
             detail = _human_tool_result(payload)
+            if payload.get("result_summary"):
+                detail += f"  {payload['result_summary']}"
+            if payload.get("duplicate_evidence"):
+                detail += "  未产生新证据"
             if payload.get("return_code") is not None:
                 detail += f"  rc={payload['return_code']}"
             if payload.get("content_characters") is not None:
@@ -267,6 +307,10 @@ class TerminalUI:
                 detail += f"  files={payload['changed_files']}"
             elif payload.get("path"):
                 detail += f"  path={payload['path']}"
+            if payload.get("line_range"):
+                detail += f"  lines={payload['line_range']}"
+            if payload.get("query") and payload.get("tool_name") == "search_text":
+                detail += f"  query={payload['query']}"
             if not payload.get("success") and payload.get("failure_reason"):
                 detail += "  " + _truncate(
                     str(payload["failure_reason"]),
@@ -274,7 +318,7 @@ class TerminalUI:
                 )
         elif event == "patch_applied":
             detail = (
-                "PATCH  "
+                "修改完成  "
                 f"files={payload.get('changed_files', [])}  "
                 f"hunks={payload.get('hunks_applied', 0)}"
             )
@@ -296,7 +340,7 @@ class TerminalUI:
         elif event == "verification":
             status = payload.get("status")
             detail = (
-                "VERIFY  "
+                "验证 VERIFY  "
                 f"status={status}  kind={payload.get('kind')}  "
                 f"return_code={payload.get('return_code')}"
             )
@@ -304,7 +348,8 @@ class TerminalUI:
             detail = f"RECOVERY  {_truncate(str(payload.get('reason', '')), 88)}"
         elif event == "step_summary":
             detail = (
-                f"STEP  tools={payload.get('succeeded', 0)}/{payload.get('tools', 0)} ok"
+                f"STEP  {_phase_label(payload.get('phase')) or '处理'}  "
+                f"tools={payload.get('succeeded', 0)}/{payload.get('tools', 0)} ok"
                 f"  failed={payload.get('failed', 0)}"
             )
             if payload.get("current_plan_step"):
@@ -312,7 +357,10 @@ class TerminalUI:
             if payload.get("verification") != "not_run":
                 detail += f"  verify={payload.get('verification')}"
         elif event == "final":
-            detail = f"FINAL  status={payload.get('status')}"
+            detail = (
+                f"完成  status={payload.get('status')}  "
+                f"verification={payload.get('verification_status', 'not_run')}"
+            )
         else:
             detail = str(event)
         return f"{prefix} {self._paint(detail, tone)}"
@@ -337,13 +385,24 @@ class TerminalUI:
         tone = "green" if status == "VERIFIED" else "yellow"
         self._write("")
         self._write(self._paint("+-- Run summary " + "-" * 63 + "+", tone))
-        self._write(f"| Status         {status:<62} |")
-        self._write(
-            f"| Steps          {getattr(state, 'step', '?')}/{getattr(state, 'max_steps', '?'):<59} |"
-        )
-        self._write(f"| Verification   {verification:<62} |")
-        self._write(f"| Elapsed        {elapsed:.1f}s{' ' * max(0, 60 - len(f'{elapsed:.1f}s'))} |")
-        self._write(f"| Files changed  {_truncate(', '.join(changed_files) or 'none', 62):<62} |")
+        self._write(_box_row(f"Status         {status}"))
+        self._write(_box_row(
+            f"Steps          {getattr(state, 'step', '?')}/{getattr(state, 'max_steps', '?')}"
+        ))
+        self._write(_box_row(f"Verification   {verification}"))
+        plan = getattr(state, "plan", None)
+        if plan is not None:
+            completed = sum(
+                getattr(step.status, "value", step.status) == "completed"
+                for step in plan.steps
+            )
+            self._write(_box_row(
+                f"Plan           {completed}/{len(plan.steps)} steps completed"
+            ))
+        self._write(_box_row(f"Elapsed        {elapsed:.1f}s"))
+        self._write(_box_row(
+            f"Files changed  {_truncate(', '.join(changed_files) or 'none', 62)}"
+        ))
         self._write(self._paint("+" + "-" * 76 + "+", tone))
 
     def render_plan_history(self, plans: Sequence[Any]) -> None:
@@ -498,6 +557,19 @@ def _human_tool_result(payload: Mapping[str, Any]) -> str:
     return f"完成: {label}" if payload.get("success") else f"失败: {label}"
 
 
+def _phase_label(value: Any) -> str:
+    labels = {
+        "inspect": "检查",
+        "plan": "规划",
+        "implement": "实现",
+        "verify": "验证",
+        "review": "复核",
+        "recover": "恢复",
+        "work": "处理",
+    }
+    return labels.get(str(value), "") if value else ""
+
+
 def _compact_statuses(value: Any) -> str:
     if not isinstance(value, Mapping):
         return ""
@@ -519,6 +591,45 @@ def _truncate(value: str, limit: int) -> str:
     if limit <= 3:
         return value[:limit]
     return value[: limit - 3] + "..."
+
+
+def _display_width(value: str) -> int:
+    """Approximate terminal cell width, including Chinese wide characters."""
+
+    width = 0
+    for character in value:
+        if unicodedata.combining(character):
+            continue
+        width += 2 if unicodedata.east_asian_width(character) in {"W", "F"} else 1
+    return width
+
+
+def _fit_display(value: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    if _display_width(value) <= width:
+        return value + " " * (width - _display_width(value))
+    if width <= 3:
+        result = ""
+    else:
+        result = ""
+        current = 0
+        for character in value:
+            character_width = 0 if unicodedata.combining(character) else (
+                2 if unicodedata.east_asian_width(character) in {"W", "F"} else 1
+            )
+            if current + character_width > width - 3:
+                break
+            result += character
+            current += character_width
+        result += "..."
+    return result + " " * max(0, width - _display_width(result))
+
+
+def _box_row(value: str, width: int = 76) -> str:
+    """Render a dashboard row using terminal cells rather than Python len()."""
+
+    return "|" + _fit_display(value, width) + "|"
 
 
 def _human_size(characters: int) -> str:

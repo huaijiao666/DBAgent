@@ -61,6 +61,21 @@ def test_python3_alias_uses_the_active_python_environment(tmp_path: Path) -> Non
     assert Path(result.stdout.strip()).parent == Path(sys.executable).parent
 
 
+def test_missing_executable_is_a_structured_command_result(tmp_path: Path) -> None:
+    executor = CommandExecutor(Workspace(tmp_path))
+
+    result = executor.run(
+        ["definitely-not-an-installed-executable"],
+        cwd=".",
+        timeout_seconds=10,
+    )
+
+    assert result.return_code == 127
+    assert result.timed_out is False
+    assert result.stdout == ""
+    assert "executable not found" in result.stderr
+
+
 def test_command_cwd_cannot_escape_workspace(tmp_path: Path) -> None:
     workspace = tmp_path / "repo"
     workspace.mkdir()

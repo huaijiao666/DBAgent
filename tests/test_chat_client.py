@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 import httpx2
-from openai import APIConnectionError, APITimeoutError
+from openai import APIConnectionError, APIStatusError, APITimeoutError
 
 from forge.config import ForgeConfig
 from forge.llm import (
@@ -221,7 +221,7 @@ def test_chat_request_uses_nested_function_tools_and_instructions() -> None:
     assert "conversation" not in parameters
 
 
-def test_chat_request_uses_provider_thinking_extension_only_when_enabled() -> None:
+def test_chat_request_uses_provider_non_thinking_extension_for_deepseek() -> None:
     sdk = _sdk(_response(content="done"))
     config = ForgeConfig(
         openai_api_key="test-key",
@@ -238,7 +238,7 @@ def test_chat_request_uses_provider_thinking_extension_only_when_enabled() -> No
 
     parameters = sdk.chat.completions.create.call_args.kwargs
     assert parameters["reasoning_effort"] == "high"
-    assert parameters["extra_body"] == {"thinking": {"type": "enabled"}}
+    assert parameters["extra_body"] == {"thinking": {"type": "disabled"}}
 
 
 def test_chat_disables_deepseek_thinking_during_executable_tool_turns() -> None:
@@ -265,7 +265,70 @@ def test_chat_disables_deepseek_thinking_during_executable_tool_turns() -> None:
     assert parameters["extra_body"] == {"thinking": {"type": "disabled"}}
 
 
-def test_deepseek_finalization_omits_tools_before_enabling_thinking() -> None:
+def test_deepseek_tool_turn_does_not_replay_or_retain_reasoning_content() -> None:
+    """Thinking-disabled tool turns must not form an invalid DeepSeek history."""
+
+    config = ForgeConfig(
+        openai_api_key="test-key",
+        model="deepseek-v4-flash",
+        reasoning_effort="high",
+        base_url="https://api.deepseek.com",
+        api_mode="chat_completions",
+        provider="deepseek",
+    )
+    tool = FunctionTool(
+        name="read_file",
+        description="Read one file.",
+        parameters={"type": "object", "properties": {}, "additionalProperties": False},
+    )
+    raw_tool_call = SimpleNamespace(
+        id="call_1",
+        type="function",
+        function=SimpleNamespace(name="read_file", arguments='{"path":"README.md"}'),
+    )
+    sdk = _sdk(
+        _response(
+            content="",
+            tool_calls=(raw_tool_call,),
+            finish_reason="tool_calls",
+            reasoning_content="provider-private reasoning",
+        )
+    )
+    client = OpenAIChatCompletionsClient(config, sdk_client=sdk)
+
+    response = client.create_response(ModelRequest(input="Inspect", tools=(tool,)))
+
+    assert not any(item["type"] == "reasoning" for item in response.output_items)
+    initial_parameters = sdk.chat.completions.create.call_args.kwargs
+    assert initial_parameters["extra_body"] == {"thinking": {"type": "disabled"}}
+
+    client.create_response(
+        ModelRequest(
+            input=(
+                {"type": "reasoning", "content": "old provider reasoning"},
+                {"role": "assistant", "content": ""},
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "read_file",
+                    "arguments": '{"path":"README.md"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "README contents",
+                },
+            ),
+            tools=(tool,),
+        )
+    )
+
+    later_messages = sdk.chat.completions.create.call_args.kwargs["messages"]
+    assistant_message = next(item for item in later_messages if item["role"] == "assistant")
+    assert "reasoning_content" not in assistant_message
+
+
+def test_deepseek_finalization_omits_tools_and_keeps_thinking_disabled() -> None:
     sdk = _sdk(_response(content="done"))
     config = ForgeConfig(
         openai_api_key="test-key",
@@ -286,7 +349,7 @@ def test_deepseek_finalization_omits_tools_before_enabling_thinking() -> None:
     )
 
     parameters = sdk.chat.completions.create.call_args.kwargs
-    assert parameters["extra_body"] == {"thinking": {"type": "enabled"}}
+    assert parameters["extra_body"] == {"thinking": {"type": "disabled"}}
     assert "tools" not in parameters
     assert "tool_choice" not in parameters
 
@@ -342,7 +405,7 @@ def test_chat_normalizes_exact_compatibility_arguments_wrapper() -> None:
     assert result.function_calls[0].arguments_json == '{"files":[]}'
 
 
-def test_chat_normalizes_reasoning_for_a_later_deepseek_tool_turn() -> None:
+def test_chat_does_not_retain_deepseek_reasoning_content() -> None:
     raw_tool_call = SimpleNamespace(
         id="call_123",
         type="function",
@@ -371,12 +434,9 @@ def test_chat_normalizes_reasoning_for_a_later_deepseek_tool_turn() -> None:
         ModelRequest(input="Read it")
     )
 
-    assert result.output_items[0] == {
-        "type": "reasoning",
-        "content": "The README likely contains the startup command.",
-    }
-    assert result.output_items[1]["type"] == "message"
-    assert result.output_items[2]["type"] == "function_call"
+    assert not any(item["type"] == "reasoning" for item in result.output_items)
+    assert result.output_items[0]["type"] == "message"
+    assert result.output_items[1]["type"] == "function_call"
 
 
 def test_chat_rejects_textual_dsml_instead_of_executing_it() -> None:
@@ -455,3 +515,32 @@ def test_chat_transport_errors_are_wrapped(
         )
 
     assert caught.value.__cause__ is sdk_error
+
+
+def test_chat_status_error_includes_redacted_provider_diagnostic() -> None:
+    sdk = _sdk(_response(content="done"))
+    request = httpx2.Request("POST", "https://provider.example/v1")
+    response = httpx2.Response(400, request=request)
+    error = APIStatusError(
+        "bad request",
+        response=response,
+        body={
+            "error": {
+                "type": "invalid_request_error",
+                "code": "context_length_exceeded",
+                "message": "input too long; api_key=secret-value sk-secret-token",
+            }
+        },
+    )
+    sdk.chat.completions.create.side_effect = error
+
+    with pytest.raises(RuntimeError, match="context_length_exceeded") as caught:
+        OpenAIChatCompletionsClient(_config(), sdk_client=sdk).create_response(
+            ModelRequest(input="hello")
+        )
+
+    message = str(caught.value)
+    assert "HTTP 400" in message
+    assert "[redacted]" in message
+    assert "secret-value" not in message
+    assert "sk-secret-token" not in message

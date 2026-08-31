@@ -42,3 +42,7 @@ class ModelRateLimitError(ModelAPIError):
 
 class ModelProtocolError(ModelCommunicationError):
     """Raised when an SDK response does not match the expected contract."""
+
+
+class ModelTextualToolMarkupError(ModelProtocolError):
+    """Raised when a provider emits text markup instead of a native tool call."""

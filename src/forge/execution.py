@@ -144,6 +144,26 @@ class CommandExecutor:
                 shell=False,
                 check=False,
             )
+        except FileNotFoundError:
+            # A missing executable is an ordinary, deterministic command
+            # outcome (common when a model assumes a Unix-only utility on
+            # Windows), not a harness crash. Returning it in the normal result
+            # shape lets verification and no-progress recovery see the command
+            # and prevents an uninformative series of tool exceptions.
+            return CommandResult(
+                command=arguments,
+                cwd=self._workspace.relative_name(working_directory),
+                return_code=127,
+                timed_out=False,
+                stdout="",
+                stderr=(
+                    f"executable not found: {arguments[0]}. "
+                    "Choose an available command; for Python checks prefer "
+                    "python -m <module>."
+                ),
+                stdout_truncated=False,
+                stderr_truncated=False,
+            )
         except subprocess.TimeoutExpired as error:
             stdout, stdout_truncated = _truncate_stream(
                 _timeout_text(error.stdout), self._max_stream_characters

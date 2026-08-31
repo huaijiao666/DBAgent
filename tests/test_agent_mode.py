@@ -167,6 +167,7 @@ def test_every_turn_preserves_workspace_and_launch_directory_facts(
     snapshot = str(model.requests[0].input[1]["content"])
     assert f"Absolute workspace root: {workspace.resolve()}" in snapshot
     assert f"User launch directory: {launch_directory.resolve()}" in snapshot
+    assert "For Python commands, use `python`" in snapshot
     assert "Do not replace it with a parent repository" in snapshot
     assert state.launch_directory == launch_directory.resolve()
 

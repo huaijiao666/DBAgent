@@ -7,6 +7,7 @@ inside an in-memory :class:`ForgeConfig`.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,7 +15,8 @@ from forge.config import ConfigurationError, ForgeConfig
 
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEFAULT_DEEPSEEK_KEY_FILE = Path("C:/AAA/DBAgent/api_key.txt")
+DEFAULT_DEEPSEEK_KEY_FILE = Path.home() / ".dba" / "deepseek_api_key.txt"
+_LEGACY_DEEPSEEK_KEY_FILE = Path("C:/AAA/DBAgent/api_key.txt")
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,14 +52,14 @@ MODEL_PRESETS: tuple[ModelPreset, ...] = (
     ModelPreset(
         alias="deepseek-flash",
         model="deepseek-v4-flash",
-        label="DeepSeek V4 Flash (tool-safe reasoning)",
+        label="DeepSeek V4 Flash (experimental compatibility)",
         provider="deepseek",
         uses_deepseek_key=True,
     ),
     ModelPreset(
         alias="deepseek-pro",
         model="deepseek-v4-pro",
-        label="DeepSeek V4 Pro (tool-safe reasoning)",
+        label="DeepSeek V4 Pro (experimental compatibility)",
         provider="deepseek",
         uses_deepseek_key=True,
     ),
@@ -75,7 +77,7 @@ def resolve_model_selection(
     *,
     active_config: ForgeConfig,
     startup_config: ForgeConfig,
-    deepseek_key_file: Path = DEFAULT_DEEPSEEK_KEY_FILE,
+    deepseek_key_file: Path | None = None,
 ) -> ForgeConfig:
     """Build the next in-memory configuration for a model selection.
 
@@ -116,22 +118,36 @@ def resolve_model_selection(
     )
 
 
-def load_deepseek_api_key(path: Path = DEFAULT_DEEPSEEK_KEY_FILE) -> str:
+def default_deepseek_key_file() -> Path:
+    """Resolve the external key file without embedding a user-specific path."""
+
+    configured = os.environ.get("FORGE_DEEPSEEK_KEY_FILE", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    if _LEGACY_DEEPSEEK_KEY_FILE.is_file():
+        return _LEGACY_DEEPSEEK_KEY_FILE
+    return DEFAULT_DEEPSEEK_KEY_FILE
+
+
+def load_deepseek_api_key(path: Path | None = None) -> str:
     """Read exactly one API key from the user-authorized external file.
 
     The key never enters an environment variable, session checkpoint, trace, or
     rendered UI. Errors name only the file path, never its contents.
     """
 
+    resolved_path = (path or default_deepseek_key_file()).expanduser()
     try:
-        raw = path.expanduser().read_text(encoding="utf-8-sig")
+        raw = resolved_path.read_text(encoding="utf-8-sig")
     except FileNotFoundError as error:
         raise ConfigurationError(
-            f"DeepSeek key file was not found: {path}. "
+            f"DeepSeek key file was not found: {resolved_path}. "
             "Create that external file or choose another model."
         ) from error
     except OSError as error:
-        raise ConfigurationError(f"Unable to read DeepSeek key file: {path}") from error
+        raise ConfigurationError(
+            f"Unable to read DeepSeek key file: {resolved_path}"
+        ) from error
 
     lines = [line.strip() for line in raw.splitlines() if line.strip()]
     if len(lines) != 1:
