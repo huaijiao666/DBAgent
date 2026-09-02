@@ -13,7 +13,12 @@ from typing import Callable, Protocol
 from dbagent.agent.context import ContextBudget, ContextManager
 from dbagent.agent.control import AgentRunControl
 from dbagent.agent.delivery import DeliveryRequirements
-from dbagent.agent.mode import TaskMode, instructions_for_mode, resolve_task_mode
+from dbagent.agent.mode import (
+    TaskMode,
+    instructions_for_mode,
+    instructions_for_semantic_routing,
+    resolve_task_mode,
+)
 from dbagent.agent.plan import (
     PlanStepStatus,
     PlanStore,
@@ -21,6 +26,7 @@ from dbagent.agent.plan import (
     runtime_code_plan,
     update_plan_tool,
 )
+from dbagent.agent.routing import TaskModeStore, select_task_mode_tool
 from dbagent.agent.state import AgentState, AgentStatus
 from dbagent.agent.verification import (
     VerificationStatus,
@@ -65,22 +71,8 @@ _ASK_TOOL_NAMES = {
 }
 _PATCH_FRESHNESS_TOOLS = {"read_file", "git_diff", "run_command"}
 _MUTATION_TOOL_NAMES = {"apply_patch", "create_file", "write_file"}
-# A baseline plan is useful for a task that asks the agent to change code, but
-# not for every caller that happens to select ``mode=code`` (for example a
-# focused unit test which only exposes a synthetic ``echo`` tool).  The
-# decision is intentionally lexical and local: it does not need another model
-# call and is easy to explain in an interview.
-_RUNTIME_PLAN_INTENT = re.compile(
-    r"\b(?:create|build|implement|add|fix|repair|debug|refactor|modify|"
-    r"change|write|develop|generate|make)\b|"
-    # Keep this aligned with the common Chinese coding requests accepted by
-    # ``resolve_task_mode``.  In particular, “做一个俄罗斯方块” is one of the
-    # most natural ways a user starts an empty-workspace build task.  Missing
-    # it left planning to the provider, which made plan state and the eventual
-    # browser summary needlessly unstable.
-    r"(?:创建|构建|实现|新增|增加|修复|调试|重构|修改|编写|开发|生成|制作|做一个|做个|完成|搭建)",
-    re.IGNORECASE,
-)
+_MAX_SEMANTIC_PLAN_MISSES = 2
+_MAX_SEMANTIC_MODE_MISSES = 2
 _PHASE_BY_TOOL = {
     "list_files": "inspect",
     "read_file": "inspect",
@@ -88,6 +80,7 @@ _PHASE_BY_TOOL = {
     "get_repo_map": "inspect",
     "search_symbol": "inspect",
     "read_symbol": "inspect",
+    "select_task_mode": "route",
     "update_plan": "plan",
     "apply_patch": "implement",
     "create_file": "implement",
@@ -154,7 +147,25 @@ class AgentLoop:
         launch_directory: Path | None = None,
         continuation_context: str = "",
     ) -> AgentState:
-        resolved_mode = resolve_task_mode(task, self._mode)
+        requested_mode = resolve_task_mode(task, self._mode)
+        # AUTO is not a lexical classifier.  If the local registry can mutate,
+        # let the same model make one semantic ASK/CODE decision before any
+        # repository authority is exposed.  A resumed explicit plan already
+        # represents coding work, while a read-only registry has no CODE
+        # capability to route to.
+        mode_selection_required = (
+            requested_mode is TaskMode.AUTO
+            and self._initial_plan is None
+            and bool(_MUTATION_TOOL_NAMES.intersection(self._tool_registry.names))
+        )
+        if mode_selection_required:
+            resolved_mode = TaskMode.AUTO
+        elif requested_mode is TaskMode.AUTO:
+            resolved_mode = (
+                TaskMode.CODE if self._initial_plan is not None else TaskMode.ASK
+            )
+        else:
+            resolved_mode = requested_mode
         user_uses_chinese = bool(re.search(r"[\u3400-\u9fff]", task))
         state = AgentState.start(
             task=task,
@@ -187,21 +198,13 @@ class AgentLoop:
                 + ". Do not treat the task as complete until every named file exists "
                 "and deterministic verification covers the completed project."
             )
-        runtime_plan_bootstrapped = _should_bootstrap_runtime_plan(
-            task,
+        plan_store = PlanStore.resume(self._initial_plan)
+        semantic_planning_required = _should_request_semantic_plan(
             mode=resolved_mode,
             has_initial_plan=self._initial_plan is not None,
             registered_tools=self._tool_registry.names,
         )
-        plan_store = PlanStore.resume(
-            self._initial_plan
-            if self._initial_plan is not None
-            else (
-                runtime_code_plan(task, chinese=user_uses_chinese)
-                if runtime_plan_bootstrapped
-                else None
-            )
-        )
+        mode_store = TaskModeStore()
         verification = VerificationTracker(
             mutation_generation=1 if self._verification_required else 0
         )
@@ -212,19 +215,19 @@ class AgentLoop:
         repair_required = False
         repair_readonly_rounds = 0
         mutation_verification_pending = False
-        runtime_plan_has_mutation = False
+        semantic_plan_misses = 0
+        semantic_mode_misses = 0
         last_reported_compaction = (0, 0)
         ask_tool_rounds = 0
         unverified_finalization_attempts = 0
         seen_evidence: set[tuple[tuple[str, str], int]] = set()
         seen_read_ranges: dict[str, list[tuple[int, int]]] = {}
-        run_registry = (
-            self._tool_registry.select(_ASK_TOOL_NAMES)
-            if resolved_mode is TaskMode.ASK
-            else self._tool_registry.clone()
+        run_registry = _registry_for_mode(
+            self._tool_registry,
+            resolved_mode,
+            plan_store,
+            mode_store,
         )
-        if resolved_mode is TaskMode.CODE and not runtime_plan_bootstrapped:
-            run_registry.register(update_plan_tool(plan_store))
         if plan_store.plan is not None:
             state.plan = plan_store.plan
             state.plan_history = list(plan_store.history)
@@ -245,13 +248,18 @@ class AgentLoop:
                 "tool_count": len(tool_schemas),
             },
         )
-        if runtime_plan_bootstrapped:
-            _record_plan_event(self._trace, 0, plan_store.plan, source="runtime")
-
         while state.step < state.max_steps:
             if self._abort_if_requested(state, verification):
                 return state
             state.step += 1
+            mode_selection_pending = (
+                mode_selection_required and mode_store.decision is None
+            )
+            semantic_planning_pending = (
+                not mode_selection_pending
+                and semantic_planning_required
+                and plan_store.plan is None
+            )
             for message in self._drain_steering(context_manager):
                 self._record_trace(
                     "user_steering_applied",
@@ -305,6 +313,24 @@ class AgentLoop:
                     for tool in request_tool_schemas
                     if tool.name not in _READ_PROGRESS_TOOLS
                 )
+            if semantic_planning_pending:
+                # The first CODE turn is a semantic planning boundary, not an
+                # opportunity for a model to guess at edits from its prompt.
+                # Exposing exactly one native function makes the required
+                # protocol explicit across Responses and compatible Chat APIs.
+                request_tool_schemas = tuple(
+                    tool
+                    for tool in request_tool_schemas
+                    if tool.name == "update_plan"
+                )
+            if mode_selection_pending:
+                # No repository tools are exposed until the same model has
+                # interpreted the whole request and selected its authority.
+                request_tool_schemas = tuple(
+                    tool
+                    for tool in request_tool_schemas
+                    if tool.name == "select_task_mode"
+                )
             # Treat model tool output as untrusted even when a provider claims
             # function-calling compatibility.  A provider may return a stale
             # tool name that was deliberately withheld for this turn; executing
@@ -320,10 +346,14 @@ class AgentLoop:
                     "input_items": len(snapshot.input_items),
                     "tools": [tool.name for tool in request_tool_schemas],
                     "context_usage": _context_usage_payload(snapshot.usage),
-                    "phase": _phase_for_state(
-                        plan_store.plan,
-                        verification.status,
-                        no_progress_rounds,
+                    "phase": (
+                        "route"
+                        if mode_selection_pending
+                        else _phase_for_state(
+                            plan_store.plan,
+                            verification.status,
+                            no_progress_rounds,
+                        )
                     ),
                 },
             )
@@ -349,7 +379,7 @@ class AgentLoop:
                 plan_store.plan,
                 verification,
             )
-            force_final = (
+            force_final = not mode_selection_pending and not semantic_planning_pending and (
                 (
                     state.step == state.max_steps
                     or plan_ready_for_final
@@ -366,15 +396,14 @@ class AgentLoop:
                     and not verification.is_verified
                 )
             )
-            request_instructions = self._instructions or instructions_for_mode(
-                resolved_mode
+            request_instructions = (
+                instructions_for_semantic_routing(chinese=user_uses_chinese)
+                if mode_selection_pending
+                else self._instructions or instructions_for_mode(resolved_mode)
             )
-            if runtime_plan_bootstrapped:
-                request_instructions += (
-                    "\n\nA local structured execution plan is already active and "
-                    "will be advanced only from real local evidence. Do not spend a "
-                    "turn recreating or updating that plan; inspect, implement, or "
-                    "verify the next concrete deliverable instead."
+            if semantic_planning_pending:
+                request_instructions += _semantic_planning_instruction(
+                    chinese=user_uses_chinese
                 )
             if missing_delivery_paths:
                 request_instructions += (
@@ -451,16 +480,28 @@ class AgentLoop:
                     # history and prevents one failed read/command from being
                     # followed by pre-planned calls based on its missing output.
                     parallel_tool_calls=False,
-                    tool_choice="none" if force_final else "auto",
+                    tool_choice=(
+                    "none"
+                    if force_final
+                    else (
+                        "required"
+                        if mode_selection_pending or semantic_planning_pending
+                        else "auto"
+                    )
+                ),
                 ),
                 step=state.step,
             )
             state.response_ids.append(response.response_id)
             response_payload = _model_response_payload(response)
-            response_payload["phase"] = _phase_for_state(
-                plan_store.plan,
-                verification.status,
-                no_progress_rounds,
+            response_payload["phase"] = (
+                "route"
+                if mode_selection_pending
+                else _phase_for_state(
+                    plan_store.plan,
+                    verification.status,
+                    no_progress_rounds,
+                )
             )
             self._record_trace(
                 "model_response",
@@ -485,6 +526,84 @@ class AgentLoop:
 
             if not response.function_calls:
                 answer = response.output_text.strip()
+                if mode_selection_pending:
+                    semantic_mode_misses += 1
+                    if semantic_mode_misses >= _MAX_SEMANTIC_MODE_MISSES:
+                        resolved_mode = _activate_safe_ask_fallback(
+                            state=state,
+                            mode_store=mode_store,
+                            trace=self._trace,
+                            step=state.step,
+                        )
+                        mode_selection_required = False
+                        run_registry = _registry_for_mode(
+                            self._tool_registry,
+                            resolved_mode,
+                            plan_store,
+                            mode_store,
+                        )
+                        tool_schemas = run_registry.schemas()
+                        _append_hint(
+                            state,
+                            context_manager,
+                            (
+                                "模型连续两次没有按原生 select_task_mode 协议选择任务权限。"
+                                "本轮已安全降级为只读问答；如需修改文件，请明确使用 code 模式。"
+                                if user_uses_chinese
+                                else "The model did not select task authority through two required "
+                                "native calls. This turn safely fell back to read-only ASK mode; "
+                                "select code mode explicitly to modify files."
+                            ),
+                            trace=self._trace,
+                            step=state.step,
+                        )
+                    else:
+                        _append_hint(
+                            state,
+                            context_manager,
+                            (
+                                "本轮必须先调用一次原生 select_task_mode，根据完整需求选择 ask 或 code；"
+                                "不要先回答或执行仓库工具。"
+                                if user_uses_chinese
+                                else "This turn must first call native select_task_mode to choose ask "
+                                "or code from the complete request; do not answer or use repository tools yet."
+                            ),
+                            trace=self._trace,
+                            step=state.step,
+                        )
+                    _sync_verification_state(
+                        state, verification, no_progress_rounds
+                    )
+                    continue
+                if semantic_planning_pending:
+                    semantic_plan_misses += 1
+                    if semantic_plan_misses >= _MAX_SEMANTIC_PLAN_MISSES:
+                        _install_fallback_plan(
+                            plan_store,
+                            state=state,
+                            context_manager=context_manager,
+                            task=task,
+                            chinese=user_uses_chinese,
+                            trace=self._trace,
+                            step=state.step,
+                            reason="model returned prose instead of update_plan",
+                        )
+                    else:
+                        _append_hint(
+                            state,
+                            context_manager,
+                            (
+                                "This CODE task must begin with one native update_plan "
+                                "call. Do not provide a final answer or edit yet; create "
+                                "the semantic plan from the full user request."
+                            ),
+                            trace=self._trace,
+                            step=state.step,
+                        )
+                    _sync_verification_state(
+                        state, verification, no_progress_rounds
+                    )
+                    continue
                 # A steering message submitted while the preceding request was
                 # in flight must not be silently lost to an immediate final
                 # answer.  Consume it on the next turn at the same safe model
@@ -576,7 +695,6 @@ class AgentLoop:
                 if (
                     resolved_mode is TaskMode.CODE
                     and plan_store.plan is not None
-                    and (not runtime_plan_bootstrapped or runtime_plan_has_mutation)
                     and not _plan_is_complete(plan_store.plan)
                 ):
                     state.final_answer = answer if state.step == state.max_steps else None
@@ -819,7 +937,6 @@ class AgentLoop:
                 turn_progress = turn_progress or event.mutation
                 if event.mutation:
                     round_had_mutation = True
-                    runtime_plan_has_mutation = True
                     mutation_verification_pending = True
                     _append_hint(
                         state,
@@ -940,7 +1057,106 @@ class AgentLoop:
                     step=state.step,
                 )
             context_manager.record_turn(response, executed_calls)
-            if resolved_mode is TaskMode.ASK:
+            mode_selected_this_turn = False
+            if mode_selection_pending:
+                decision = mode_store.decision
+                if decision is None:
+                    semantic_mode_misses += 1
+                    if semantic_mode_misses >= _MAX_SEMANTIC_MODE_MISSES:
+                        resolved_mode = _activate_safe_ask_fallback(
+                            state=state,
+                            mode_store=mode_store,
+                            trace=self._trace,
+                            step=state.step,
+                        )
+                        mode_selection_required = False
+                        run_registry = _registry_for_mode(
+                            self._tool_registry,
+                            resolved_mode,
+                            plan_store,
+                            mode_store,
+                        )
+                        tool_schemas = run_registry.schemas()
+                        _append_hint(
+                            state,
+                            context_manager,
+                            (
+                                "select_task_mode 未能产生有效选择，本轮已安全降级为只读问答；"
+                                "如需修改文件，请明确使用 code 模式。"
+                                if user_uses_chinese
+                                else "select_task_mode did not produce a valid selection. This turn safely "
+                                "fell back to read-only ASK mode; select code mode explicitly to modify files."
+                            ),
+                            trace=self._trace,
+                            step=state.step,
+                        )
+                    else:
+                        _append_hint(
+                            state,
+                            context_manager,
+                            (
+                                "首个工具调用无效。请只调用一次原生 select_task_mode，"
+                                "并根据完整需求选择 ask 或 code。"
+                                if user_uses_chinese
+                                else "The first tool call was invalid. Call exactly one native select_task_mode "
+                                "with ask or code based on the complete request."
+                            ),
+                            trace=self._trace,
+                            step=state.step,
+                        )
+                else:
+                    resolved_mode = decision.mode
+                    state.mode = resolved_mode
+                    mode_selection_required = False
+                    semantic_planning_required = _should_request_semantic_plan(
+                        mode=resolved_mode,
+                        has_initial_plan=self._initial_plan is not None,
+                        registered_tools=self._tool_registry.names,
+                    )
+                    run_registry = _registry_for_mode(
+                        self._tool_registry,
+                        resolved_mode,
+                        plan_store,
+                        mode_store,
+                    )
+                    tool_schemas = run_registry.schemas()
+                    mode_selected_this_turn = True
+                    turn_progress = True
+                    self._record_trace(
+                        "mode_selected",
+                        state.step,
+                        {
+                            "mode": resolved_mode.value,
+                            "source": "model",
+                            "reason": decision.reason,
+                        },
+                    )
+            if semantic_planning_pending and plan_store.plan is None:
+                semantic_plan_misses += 1
+                if semantic_plan_misses >= _MAX_SEMANTIC_PLAN_MISSES:
+                    _install_fallback_plan(
+                        plan_store,
+                        state=state,
+                        context_manager=context_manager,
+                        task=task,
+                        chinese=user_uses_chinese,
+                        trace=self._trace,
+                        step=state.step,
+                        reason="provider did not produce a valid update_plan call",
+                    )
+                else:
+                    _append_hint(
+                        state,
+                        context_manager,
+                        (
+                            "The first plan call was invalid or used a withheld tool. "
+                            "Retry exactly one valid native update_plan call now; it "
+                            "must describe the user task rather than a generic template."
+                        ),
+                        trace=self._trace,
+                        step=state.step,
+                    )
+            if resolved_mode is TaskMode.ASK and not mode_selected_this_turn:
                 ask_tool_rounds += 1
             if plan_store.plan is not None:
                 state.plan = plan_store.plan
@@ -1333,27 +1549,143 @@ def _plan_is_complete(plan) -> bool:
     )
 
 
-def _should_bootstrap_runtime_plan(
-    task: str,
+def _registry_for_mode(
+    base_registry: ToolRegistry,
+    mode: TaskMode,
+    plan_store: PlanStore,
+    mode_store: TaskModeStore,
+) -> ToolRegistry:
+    """Build the current turn's local registry after a validated mode boundary."""
+
+    if mode is TaskMode.AUTO:
+        return ToolRegistry([select_task_mode_tool(mode_store)])
+    registry = (
+        base_registry.select(_ASK_TOOL_NAMES)
+        if mode is TaskMode.ASK
+        else base_registry.clone()
+    )
+    if mode is TaskMode.CODE and "update_plan" not in registry.names:
+        registry.register(update_plan_tool(plan_store))
+    return registry
+
+
+def _activate_safe_ask_fallback(
+    *,
+    state: AgentState,
+    mode_store: TaskModeStore,
+    trace: TraceSink | None,
+    step: int,
+) -> TaskMode:
+    """Use read-only authority when a provider refuses the routing protocol."""
+
+    result = mode_store.apply(
+        {
+            "mode": TaskMode.ASK.value,
+            "reason": "Provider did not return a valid native task-mode selection.",
+        }
+    )
+    if not result.success:
+        raise RuntimeError("the local ASK routing fallback failed validation")
+    state.mode = TaskMode.ASK
+    if trace is not None:
+        trace.record(
+            "mode_selected",
+            step=step,
+            payload={
+                "mode": TaskMode.ASK.value,
+                "source": "fallback",
+                "reason": "provider did not produce a valid native mode selection",
+            },
+        )
+    return TaskMode.ASK
+
+
+def _should_request_semantic_plan(
     *,
     mode: TaskMode,
     has_initial_plan: bool,
     registered_tools: Sequence[str],
 ) -> bool:
-    """Return whether this run needs the deterministic implementation plan.
+    """Return whether the first CODE turn must create a model-authored plan.
 
-    A caller-supplied plan always wins.  The runtime baseline is deliberately
-    limited to implementation-oriented tasks with a local mutation tool; this
-    keeps question/inspection runs lightweight while ensuring a real coding
-    task has an observable plan even when a provider omits ``update_plan``.
+    This is deliberately based on the caller-selected CODE capability and the
+    presence of local mutation tools, not on task wording. The model owns task
+    semantics; the runtime only establishes the planning protocol.
     """
 
     return (
         mode is TaskMode.CODE
         and not has_initial_plan
-        and bool(_RUNTIME_PLAN_INTENT.search(task))
         and bool(_MUTATION_TOOL_NAMES.intersection(registered_tools))
     )
+
+
+def _semantic_planning_instruction(*, chinese: bool) -> str:
+    """Return the first-turn contract for the same model's semantic plan."""
+
+    if chinese:
+        return """
+
+【语义规划回合】现在只能调用一次原生 update_plan，不能调用其他工具，也不能修改代码。
+请依据完整用户需求和本地上下文理解任务本身，不要按关键词套模板。目标应概括用户真正要
+交付的结果；成功标准必须可由后续本地证据检验；步骤应覆盖实际需要的调查、实现、集成和
+验证工作。第一步应为 in_progress，其余步骤为 pending，初始计划中不得有 completed 步骤。
+保留 inspect、verify、deliver 这三个稳定步骤 ID；其他步骤请用体现具体交付物的稳定 ID。
+计划建立后，下一回合再读取仓库并根据真实证据推进状态或补充成功标准。
+"""
+    return """
+
+Semantic planning turn: make exactly one native update_plan call now. Do not use
+any other tool and do not edit code. Infer the plan from the complete user task
+and local context, never from a keyword template. State the actual deliverable
+as the goal, use success criteria that later local evidence can check, and cover
+the investigation, implementation, integration, and verification work that is
+actually needed. Mark exactly one first step in_progress, leave every other
+initial step pending, and mark no initial step completed. Keep stable step IDs
+inspect, verify, and deliver; use additional stable IDs that describe the
+specific deliverables. On the next turn, inspect the repository and refine the
+plan from real evidence if needed.
+"""
+
+
+def _install_fallback_plan(
+    plan_store: PlanStore,
+    *,
+    state: AgentState,
+    context_manager: ContextManager,
+    task: str,
+    chinese: bool,
+    trace: TraceSink | None,
+    step: int,
+    reason: str,
+) -> None:
+    """Install a deliberately generic plan after repeated protocol failures."""
+
+    result = plan_store.apply(runtime_code_plan(task, chinese=chinese).to_dict())
+    if not result.success:
+        raise RuntimeError("the local fallback plan failed validation")
+    assert plan_store.plan is not None
+    state.plan = plan_store.plan
+    state.plan_history = list(plan_store.history)
+    context_manager.set_plan(plan_store.plan.to_prompt())
+    _record_plan_event(trace, step, plan_store.plan, source="fallback")
+    _append_hint(
+        state,
+        context_manager,
+        (
+            "The model did not provide a valid semantic plan after two required "
+            "native calls. A minimal local planning scaffold is now active; inspect "
+            "the repository and replace its generic steps with evidence-based detail."
+        ),
+        trace=trace,
+        step=step,
+    )
+    if trace is not None:
+        trace.record(
+            "planning_fallback",
+            step=step,
+            payload={"reason": reason, "phase": "plan"},
+        )
 
 
 def _advance_runtime_plan(
@@ -1371,8 +1703,15 @@ def _advance_runtime_plan(
     if plan is None:
         return False
     statuses = {step.step_id: step.status for step in plan.steps}
-    required = {"inspect", "implement", "verify", "deliver"}
+    required = {"inspect", "verify", "deliver"}
     if not required.issubset(statuses):
+        return False
+    implementation_steps = [
+        step.step_id
+        for step in plan.steps
+        if step.step_id not in required
+    ]
+    if not implementation_steps:
         return False
     saw_inspection = any(
         observation.success and getattr(call, "name", "") in _READ_PROGRESS_TOOLS
@@ -1382,17 +1721,52 @@ def _advance_runtime_plan(
     if saw_inspection or had_mutation or saw_verification:
         updates["inspect"] = PlanStepStatus.COMPLETED
     if had_mutation or saw_verification:
-        updates["implement"] = PlanStepStatus.IN_PROGRESS
+        active_implementation = next(
+            (
+                step_id
+                for step_id in implementation_steps
+                if statuses[step_id] is PlanStepStatus.IN_PROGRESS
+            ),
+            None,
+        )
+        next_implementation = active_implementation or next(
+            (
+                step_id
+                for step_id in implementation_steps
+                if statuses[step_id] is PlanStepStatus.PENDING
+            ),
+            None,
+        )
+        if next_implementation is not None:
+            updates[next_implementation] = PlanStepStatus.IN_PROGRESS
     if saw_verification:
         updates["verify"] = PlanStepStatus.IN_PROGRESS
     if verification.is_verified and delivery_satisfied:
-        updates.update(
-            {
-                "implement": PlanStepStatus.COMPLETED,
-                "verify": PlanStepStatus.COMPLETED,
-                "deliver": PlanStepStatus.IN_PROGRESS,
-            }
-        )
+        # A passing command proves only the currently active implementation
+        # phase. It must not silently complete every model-authored delivery
+        # step: the model may still know about pending migration, documentation,
+        # or integration work that this one command did not exercise.
+        active_steps = [
+            step_id
+            for step_id in implementation_steps
+            if statuses[step_id] is PlanStepStatus.IN_PROGRESS
+        ]
+        pending_steps = [
+            step_id
+            for step_id in implementation_steps
+            if statuses[step_id] is PlanStepStatus.PENDING
+        ]
+        if active_steps and not pending_steps:
+            updates.update(
+                {
+                    **{
+                        step_id: PlanStepStatus.COMPLETED
+                        for step_id in active_steps
+                    },
+                    "verify": PlanStepStatus.COMPLETED,
+                    "deliver": PlanStepStatus.IN_PROGRESS,
+                }
+            )
     # Never attempt a backwards transition when a model has already completed
     # a step; PlanStore remains the one authority for transition validity.
     forward = {
@@ -1457,6 +1831,7 @@ def _tool_intent(tool_name: str) -> str:
         "get_repo_map": "分析仓库结构",
         "search_symbol": "定位代码符号",
         "read_symbol": "查看符号实现",
+        "select_task_mode": "判断本轮任务类型",
         "update_plan": "更新任务计划",
         "apply_patch": "应用局部修改",
         "create_file": "创建项目文件",
@@ -1487,6 +1862,26 @@ def _display_progress_text(
     normalized = " ".join(text.split())
     if not normalized or len(normalized) < 14:
         return ""
+    # Compatible providers can occasionally echo part of the local request
+    # envelope instead of supplying a user-facing checkpoint.  This is neither
+    # new evidence nor useful progress, and exposing it makes the chat surface
+    # look as though internal context leaked into the conversation.
+    context_markers = (
+        "[persistent task context]",
+        "[current plan]",
+        "[recent local conversation]",
+        "[structured local session state]",
+        "local context snapshot",
+        "absolute workspace root",
+        "user launch directory",
+        "上下文快照",
+        "持久任务上下文",
+        "当前计划]",
+        "本地会话背景",
+    )
+    lowered = normalized.casefold()
+    if len(normalized) > 520 or any(marker in lowered for marker in context_markers):
+        return ""
     if chinese and not re.search(r"[\u3400-\u9fff]", normalized):
         # Do not pretend to translate free-form provider reasoning. Local tool
         # results and verification messages remain Chinese and deterministic.
@@ -1498,9 +1893,7 @@ def _display_progress_text(
     )
     if not meaningful_signal.search(normalized):
         return ""
-    if len(normalized) <= 420:
-        return normalized
-    return normalized[:417].rstrip() + "…"
+    return normalized
 
 
 def _phase_for_state(
@@ -1519,7 +1912,14 @@ def _phase_for_state(
         lowered = current.casefold()
         if any(word in lowered for word in ("test", "verify", "check", "lint")):
             return "verify"
-        if any(word in lowered for word in ("implement", "fix", "write", "edit", "build")):
+        if any(
+            word in lowered
+            for word in (
+                "implement", "fix", "write", "edit", "build", "foundation",
+                "frontend", "backend", "integration", "实现", "修复", "编写",
+                "构建", "创建", "集成", "交互", "数据",
+            )
+        ):
             return "implement"
         if any(word in lowered for word in ("plan", "design")):
             return "plan"

@@ -18,7 +18,6 @@ from dbagent.agent import (
     ContextBudget,
     SessionContext,
     TaskMode,
-    resolve_task_mode,
 )
 from dbagent.agent.verification import VerificationStatus
 from dbagent.config import (
@@ -347,11 +346,13 @@ class DBAgentRepl:
             # A process crash can restore the conversation even though step-level
             # AgentLoop state is intentionally not replayed.
             self._persist_session(ui, run_state="in_progress")
-            resolved_mode = resolve_task_mode(line, self._mode)
+            # AUTO authority is selected by the same model from the complete
+            # request through a native tool.  Do not pre-classify the turn from
+            # a local keyword list here.
+            resolved_mode = self._mode
             # A resumed unfinished coding plan is explicit user intent. In auto
-            # mode, commands such as "continue" must retain CODE authority even
-            # though the continuation sentence itself may not contain a verb
-            # from the normal mutation classifier.
+            # mode, commands such as "continue" retain CODE authority without
+            # requiring another semantic-routing round.
             if (
                 self._mode is TaskMode.AUTO
                 and _is_continuation_request(line)
@@ -379,7 +380,7 @@ class DBAgentRepl:
                 model=config.model,
                 max_steps=self.max_steps,
                 mode=(
-                    f"{resolved_mode.value} (auto)"
+                    "auto (semantic)"
                     if self._mode is TaskMode.AUTO
                     else resolved_mode.value
                 ),

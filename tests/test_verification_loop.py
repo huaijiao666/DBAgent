@@ -22,8 +22,30 @@ class ScriptedModelClient:
     def __init__(self, responses: list[ModelResponse]) -> None:
         self.responses = responses
         self.requests = []
+        self.planning_requests = []
+        self.auto_plan_installed = False
+        self.auto_plan_completed = False
 
     def create_response(self, request):
+        if _semantic_plan_only_request(request) and (
+            not self.responses
+            or not any(
+                call.name == "update_plan"
+                for call in self.responses[0].function_calls
+            )
+        ):
+            self.planning_requests.append(request)
+            self.auto_plan_installed = True
+            return _semantic_plan_response()
+        if (
+            self.auto_plan_installed
+            and not self.auto_plan_completed
+            and request.tool_choice == "auto"
+            and self.responses
+            and not self.responses[0].function_calls
+        ):
+            self.auto_plan_completed = True
+            return _semantic_plan_response(completed=True)
         self.requests.append(request)
         if not self.responses:
             raise AssertionError("model called more times than expected")
@@ -86,6 +108,32 @@ def _tool_response(response_id: str, call_id: str, name: str, arguments: dict) -
         ),
         function_calls=(call,),
         usage=None,
+    )
+
+
+def _semantic_plan_only_request(request) -> bool:
+    return request.tool_choice == "required" and {
+        tool.name for tool in request.tools
+    } == {"update_plan"}
+
+
+def _semantic_plan_response(*, completed: bool = False) -> ModelResponse:
+    status = "completed" if completed else "in_progress"
+    later_status = "completed" if completed else "pending"
+    return _tool_response(
+        "semantic_plan",
+        "semantic_plan",
+        "update_plan",
+        {
+            "goal": "Scripted coding task",
+            "success_criteria": ["Run deterministic verification after changes"],
+            "steps": [
+                {"id": "inspect", "description": "Inspect relevant code", "status": status},
+                {"id": "implement", "description": "Make the required change", "status": later_status},
+                {"id": "verify", "description": "Run deterministic verification", "status": later_status},
+                {"id": "deliver", "description": "Summarize local evidence", "status": later_status},
+            ],
+        },
     )
 
 
@@ -183,6 +231,7 @@ def test_failed_test_feedback_then_second_patch_is_verified(tmp_path: Path) -> N
             model,
             create_coding_registry(workspace),
             max_steps=8,
+            mode="code",
             trace=trace,
         ).run("Fix the calculator bug and verify it.", workspace=workspace)
     finally:
@@ -281,6 +330,7 @@ def test_empty_workspace_can_build_multifile_project_and_verify_it(
         model,
         create_coding_registry(tmp_path),
         max_steps=8,
+        mode="code",
     ).run("Build and test a small number guessing CLI.", workspace=tmp_path)
 
     assert state.status is AgentStatus.COMPLETED
@@ -314,6 +364,7 @@ def test_final_claim_without_current_evidence_becomes_incomplete(
         model,
         create_coding_registry(tmp_path),
         max_steps=2,
+        mode="code",
     ).run("Change the file and verify it.", workspace=tmp_path)
 
     assert state.status is AgentStatus.MAX_STEPS

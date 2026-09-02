@@ -267,6 +267,10 @@ class TerminalUI:
                 f"status={payload.get('status')}  "
                 f"calls={payload.get('function_call_count')}{tokens}"
             )
+        elif event == "mode_selected":
+            mode = "编码" if payload.get("mode") == "code" else "只读问答"
+            source = "语义路由" if payload.get("source") == "model" else "安全降级"
+            detail = f"任务权限  {source}选择{mode}"
         elif event == "model_wait":
             detail = (
                 "仍在等待模型  "
@@ -516,6 +520,7 @@ _EVENT_STYLE = {
     "assistant_update": ("·", "blue"),
     "model_request": (".", "blue"),
     "model_response": ("<-", "blue"),
+    "mode_selected": ("?", "blue"),
     "model_wait": ("·", "muted"),
     "model_error": ("!!", "red"),
     "tool_start": ("->", "yellow"),
@@ -543,6 +548,7 @@ _TOOL_LABELS = {
     "run_command": "运行命令",
     "git_diff": "检查改动",
     "update_plan": "更新计划",
+    "select_task_mode": "语义判断任务类型",
 }
 
 
@@ -573,6 +579,7 @@ def _human_tool_result(payload: Mapping[str, Any]) -> str:
 
 def _phase_label(value: Any) -> str:
     labels = {
+        "route": "路由",
         "inspect": "检查",
         "plan": "规划",
         "implement": "实现",

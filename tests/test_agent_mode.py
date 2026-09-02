@@ -64,17 +64,110 @@ def _registry() -> ToolRegistry:
     )
 
 
-def test_auto_mode_distinguishes_questions_from_mutations() -> None:
-    assert resolve_task_mode("这个项目怎么运行，有什么功能？") is TaskMode.ASK
-    assert resolve_task_mode("这个项目能实现什么功能，有哪些改进点？") is TaskMode.ASK
-    assert resolve_task_mode("如何实现缓存？") is TaskMode.ASK
-    assert resolve_task_mode("说明改进点，但不要修改代码") is TaskMode.ASK
-    assert resolve_task_mode("review it without changing files") is TaskMode.ASK
-    assert resolve_task_mode("inspect and explain this repository") is TaskMode.ASK
-    assert resolve_task_mode("修复 runner.py 的反向移动 bug") is TaskMode.CODE
-    assert resolve_task_mode("add a regression test") is TaskMode.CODE
-    assert resolve_task_mode("写一个可玩的贪吃蛇游戏") is TaskMode.CODE
-    assert resolve_task_mode("怎么写一个可玩的贪吃蛇游戏？") is TaskMode.ASK
+def test_auto_mode_defers_all_natural_language_interpretation_to_model() -> None:
+    requests = [
+        "这个项目怎么运行，有什么功能？",
+        "说明改进点，但不要修改代码",
+        "修复 runner.py 的反向移动 bug",
+        "add a regression test",
+        "怎么写一个可玩的贪吃蛇游戏？",
+    ]
+
+    assert all(resolve_task_mode(task) is TaskMode.AUTO for task in requests)
+
+
+def test_auto_mode_uses_native_semantic_routing_before_planning(
+    tmp_path: Path,
+) -> None:
+    plan = {
+        "goal": "修复反向移动问题",
+        "success_criteria": ["相关测试通过"],
+        "steps": [
+            {"id": "inspect", "description": "定位故障", "status": "in_progress"},
+            {"id": "fix", "description": "修改实现", "status": "pending"},
+            {"id": "verify", "description": "运行测试", "status": "pending"},
+            {"id": "deliver", "description": "总结结果", "status": "pending"},
+        ],
+    }
+    model = ScriptedModel(
+        [
+            _response(
+                "route",
+                calls=(
+                    FunctionCall(
+                        "route",
+                        "select_task_mode",
+                        json.dumps({"mode": "code", "reason": "用户要求修复本地代码"}),
+                    ),
+                ),
+            ),
+            _response(
+                "plan",
+                calls=(FunctionCall("plan", "update_plan", json.dumps(plan)),),
+            ),
+        ]
+    )
+
+    state = AgentLoop(model, _registry(), max_steps=2).run(
+        "修复 runner.py 的反向移动 bug", workspace=tmp_path
+    )
+
+    assert state.mode is TaskMode.CODE
+    assert state.plan is not None
+    assert {tool.name for tool in model.requests[0].tools} == {"select_task_mode"}
+    assert {tool.name for tool in model.requests[1].tools} == {"update_plan"}
+    assert all(request.tool_choice == "required" for request in model.requests)
+
+
+def test_auto_mode_can_semantically_select_read_only_tools(tmp_path: Path) -> None:
+    model = ScriptedModel(
+        [
+            _response(
+                "route",
+                calls=(
+                    FunctionCall(
+                        "route",
+                        "select_task_mode",
+                        json.dumps({"mode": "ask", "reason": "用户仅要求运行说明"}),
+                    ),
+                ),
+            ),
+            _response("final", text="请在项目根目录运行启动命令。"),
+        ]
+    )
+
+    state = AgentLoop(model, _registry(), max_steps=2).run(
+        "这个项目怎么运行？", workspace=tmp_path
+    )
+
+    assert state.status is AgentStatus.COMPLETED
+    assert state.mode is TaskMode.ASK
+    assert {tool.name for tool in model.requests[0].tools} == {"select_task_mode"}
+    assert "apply_patch" not in {tool.name for tool in model.requests[1].tools}
+
+
+def test_auto_mode_safely_falls_back_to_ask_after_two_invalid_routes(
+    tmp_path: Path,
+) -> None:
+    model = ScriptedModel(
+        [
+            _response("prose_1", text="I will inspect the task."),
+            _response("prose_2", text="I will inspect the task."),
+            _response("final", text="请明确使用 code 模式以修改文件。"),
+        ]
+    )
+
+    state = AgentLoop(model, _registry(), max_steps=3).run(
+        "请解释这个项目", workspace=tmp_path
+    )
+
+    assert state.status is AgentStatus.COMPLETED
+    assert state.mode is TaskMode.ASK
+    assert all(
+        {tool.name for tool in request.tools} == {"select_task_mode"}
+        for request in model.requests[:2]
+    )
+    assert "apply_patch" not in {tool.name for tool in model.requests[2].tools}
 
 
 def test_ask_mode_exposes_no_edit_or_plan_tools(tmp_path: Path) -> None:
@@ -95,25 +188,40 @@ def test_ask_mode_exposes_no_edit_or_plan_tools(tmp_path: Path) -> None:
     assert "apply_patch" not in names
 
 
-def test_code_mode_keeps_editing_tools_and_uses_runtime_plan_when_applicable(
+def test_code_mode_requires_a_model_authored_semantic_plan_before_editing(
     tmp_path: Path,
 ) -> None:
-    model = ScriptedModel([_response("final", text="No change needed")])
+    plan = {
+        "goal": "修复问题",
+        "success_criteria": ["修复后运行相关检查"],
+        "steps": [
+            {"id": "inspect", "description": "定位故障原因", "status": "in_progress"},
+            {"id": "fix", "description": "修改受影响实现", "status": "pending"},
+            {"id": "verify", "description": "运行针对性检查", "status": "pending"},
+            {"id": "deliver", "description": "总结证据", "status": "pending"},
+        ],
+    }
+    model = ScriptedModel(
+        [
+            _response(
+                "semantic_plan",
+                calls=(FunctionCall("plan", "update_plan", json.dumps(plan)),),
+            )
+        ]
+    )
 
-    state = AgentLoop(model, _registry(), mode="code").run(
+    state = AgentLoop(model, _registry(), mode="code", max_steps=1).run(
         "修复问题", workspace=tmp_path
     )
 
     names = {tool.name for tool in model.requests[0].tools}
     assert state.mode is TaskMode.CODE
-    assert {"apply_patch", "create_file"} <= names
-    assert "update_plan" not in names
+    assert names == {"update_plan"}
+    assert model.requests[0].tool_choice == "required"
     assert state.plan is not None
+    assert state.plan.goal == "修复问题"
     assert [step.step_id for step in state.plan.steps] == [
-        "inspect",
-        "implement",
-        "verify",
-        "deliver",
+        "inspect", "fix", "verify", "deliver"
     ]
 
 

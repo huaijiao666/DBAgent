@@ -11,6 +11,7 @@ from dbagent.agent import AgentRunControl, SessionContext
 from dbagent.web_ui import (
     _ASSET_DIRECTORY,
     _browser_continuation_context,
+    _resumable_plan_for_task,
     BrowserAgentController,
     BrowserAgentServer,
     _WebTraceRenderer,
@@ -274,6 +275,33 @@ def test_browser_continuation_context_does_not_contaminate_current_task() -> Non
     assert "[Current turn request]" not in rendered
 
 
+def test_browser_replaces_an_unfinished_plan_for_a_new_feature_request() -> None:
+    plan = SessionContext.from_dict(
+        {
+            "plan": {
+                "goal": "创建客服系统",
+                "success_criteria": ["项目可运行"],
+                "steps": [
+                    {
+                        "id": "inspect",
+                        "description": "检查项目",
+                        "status": "in_progress",
+                    }
+                ],
+            },
+            "verification_status": "not_run",
+            "verification_summary": "",
+            "recovery_hints": [],
+            "observations": [],
+            "turns": 1,
+        }
+    ).plan
+    assert plan is not None
+
+    assert _resumable_plan_for_task(plan, "现在增加工单优先级，不要重新创建项目") is None
+    assert _resumable_plan_for_task(plan, "继续完成当前项目") is plan
+
+
 def test_trace_renderer_publishes_from_worker_thread_without_lock_error(
     controller: BrowserAgentController,
 ) -> None:
@@ -415,6 +443,11 @@ def test_browser_surface_keeps_scrollable_regions_and_resize_handles() -> None:
     assert "agent-turn" in javascript
     assert 'title === "正在理解任务" ? "initial"' in javascript
     assert "appendSessionStream" not in javascript
+    assert "taskExcerpt" in javascript
+    assert "setSessionTitle" in javascript
+    assert "const visible = taskExcerpt" not in javascript
+    assert 'value="80"' in html
+    assert "max-height:5.1em" not in css
     assert "updateFileReferenceMenu" in javascript
     assert ".agent-turn" in css
     assert 'id="new-session"' in html

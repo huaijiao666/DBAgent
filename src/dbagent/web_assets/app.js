@@ -19,10 +19,12 @@ const toast = (message) => { const node = $("toast"); node.textContent = message
 const escapeHtml = (text) => String(text ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#039;" }[c]));
 const labels = { idle: "空闲", running: "执行中", completed: "已完成", verified: "已验证", incomplete: "未完成", error: "错误", aborted: "已停止", blocked: "已阻塞", not_run: "尚未运行", passed: "通过", failed: "失败", in_progress: "进行中", pending: "待执行" };
 const zh = (value) => labels[String(value ?? "").toLowerCase()] || String(value ?? "—");
-const toolLabel = (value) => ({ list_files: "查看项目结构", read_file: "阅读相关代码", search_text: "搜索相关引用", get_repo_map: "分析仓库结构", search_symbol: "定位代码符号", read_symbol: "阅读目标实现", apply_patch: "应用代码修改", create_file: "创建项目文件", write_file: "写入项目文件", run_command: "运行本地检查", git_diff: "复核实际改动", update_plan: "更新任务计划" }[String(value ?? "")] || "本地操作");
+const toolLabel = (value) => ({ list_files: "查看项目结构", read_file: "阅读相关代码", search_text: "搜索相关引用", get_repo_map: "分析仓库结构", search_symbol: "定位代码符号", read_symbol: "阅读目标实现", select_task_mode: "语义判断任务类型", apply_patch: "应用代码修改", create_file: "创建项目文件", write_file: "写入项目文件", run_command: "运行本地检查", git_diff: "复核实际改动", update_plan: "更新任务计划" }[String(value ?? "")] || "本地操作");
 const apiModeLabel = (value) => value === "chat_completions" ? "兼容对话接口" : value === "responses" ? "Responses 接口" : String(value ?? "本地接口");
 const providerLabel = (value) => value === "configured" ? "已配置服务" : String(value ?? "本地模型服务");
 const pathName = (path) => String(path).split("/").at(-1);
+const taskExcerpt = (value, limit = 88) => { const compact = String(value ?? "").replace(/\s+/g, " ").trim(); return compact.length <= limit ? compact : `${compact.slice(0, Math.max(1, limit - 1)).trimEnd()}…`; };
+function setSessionTitle(title, prefix = "会话") { const node = $("session-title"); const compact = taskExcerpt(title, 58); node.textContent = `${prefix}：${compact || "未命名会话"}`; node.title = String(title || ""); }
 
 function renderMarkdown(text) {
   const blocks = [];
@@ -39,7 +41,7 @@ function renderMarkdown(text) {
   }
   closeList(); return html.replace(/\u0000BLOCK(\d+)\u0000/g, (_m, index) => blocks[Number(index)] || "");
 }
-function eventTitle(event) { return ({ run_started: "任务开始", tool_start: "调用工具", tool_result: "工具结果", model_request: "请求模型", model_response: "模型响应", model_error: "模型错误", context_compacted: "压缩上下文", verification: "验证", final: "最终状态", plan_updated: "更新计划", patch_applied: "应用补丁", recovery: "恢复建议", browser_run_error: "运行错误", browser_run_finished: "任务结束", assistant_update: "执行说明", user_steering_queued: "已收到指导", user_steering_applied: "已采纳指导", user_follow_up_started: "继续会话", session_created: "新建会话" }[event] || "执行事件"); }
+function eventTitle(event) { return ({ run_started: "任务开始", tool_start: "调用工具", tool_result: "工具结果", model_request: "请求模型", model_response: "模型响应", mode_selected: "语义路由", model_error: "模型错误", context_compacted: "压缩上下文", verification: "验证", final: "最终状态", plan_updated: "更新计划", patch_applied: "应用补丁", recovery: "恢复建议", browser_run_error: "运行错误", browser_run_finished: "任务结束", assistant_update: "执行说明", user_steering_queued: "已收到指导", user_steering_applied: "已采纳指导", user_follow_up_started: "继续会话", session_created: "新建会话" }[event] || "执行事件"); }
 function eventStyle(event, payload) { if (event === "verification") return "verify"; if (event === "model_error" || event === "browser_run_error" || payload?.success === false) return "error"; if (["patch_applied", "plan_updated"].includes(event)) return "implement"; return event === "tool_start" && payload?.phase === "inspect" ? "inspect" : ""; }
 function eventDetail(event, payload) {
   if (event === "run_started") return `${({ code: "编码", ask: "问答", auto: "自动" }[payload.mode] || "自动")}模式 · ${payload.task || ""}`;
@@ -47,6 +49,7 @@ function eventDetail(event, payload) {
   if (event === "tool_result") return payload.success ? (payload.return_code !== undefined ? `本地检查结束 · 返回码=${payload.return_code}` : "本地操作已完成。") : `本地操作未成功；错误证据已反馈给 Agent 继续处理。`;
   if (event === "model_request") return `上下文 ${payload.context_usage?.approximate_tokens ?? "?"}~Token · 可用工具 ${payload.tools?.length ?? 0} 个`;
   if (event === "model_response") return `模型已响应${payload.function_call_count ? "，将继续执行本地操作" : "。"}${payload.usage?.total_tokens ? ` · ${payload.usage.total_tokens} Token` : ""}`;
+  if (event === "mode_selected") return `已根据完整需求语义选择${payload.mode === "code" ? "编码" : "只读问答"}权限${payload.source === "fallback" ? "（供应方协议异常后的安全降级）" : ""}。`;
   if (event === "model_error") return `模型请求暂时失败 · 第 ${payload.attempt ?? "?"}/${payload.max_attempts ?? "?"} 次${payload.will_retry ? "，正在重试" : "，任务将安全结束"}`;
   if (event === "context_compacted") return `保留 ${payload.recent_observations ?? "?"} 条近期观察 · 压缩 ${payload.compacted_observations ?? "?"} 条旧观察`;
   if (event === "verification") return `${payload.kind || "检查"} · ${zh(payload.status)} · 返回码=${payload.return_code ?? "?"}`;
@@ -67,7 +70,7 @@ function renderStatus(next) {
   $("metric-step").textContent = `${step} / ${maxSteps || "—"}`; $("metric-tool").textContent = next.current_tool ? toolLabel(next.current_tool) : "—"; $("metric-tokens").textContent = next.token_usage?.total_tokens ?? "—"; $("metric-context").textContent = next.context_usage?.approximate_tokens ?? "—";
   $("current-action").textContent = next.active ? (next.current_tool ? `正在${toolLabel(next.current_tool)}…` : eventTitle(next.last_event || "model_request")) : (run.status ? `本次任务：${zh(run.status)}` : "等待任务");
   $("activity-summary").textContent = next.active ? `第 ${step}/${maxSteps} 步 · ${next.current_tool ? toolLabel(next.current_tool) : "模型分析"}` : (run.status ? `任务${zh(run.status)}，点击展开执行摘要` : "等待任务");
-  const session = next.session || {}; $("provider-context").textContent = `${providerLabel(next.provider)} · ${apiModeLabel(next.api_mode)} · 本地工作区边界`; $("session-summary").innerHTML = `<strong>${escapeHtml(session.title || "未命名会话")}</strong><br><code>${escapeHtml(session.id || "")}</code><br>${next.active ? `第 ${step}/${maxSteps} 步 · ${escapeHtml(next.current_tool ? toolLabel(next.current_tool) : "等待模型")}` : `${escapeHtml(zh(run.status))} · 验证 ${escapeHtml(zh(session.verification || run.verification))}`}`;
+  const session = next.session || {}; setSessionTitle(session.title || "未命名会话"); $("provider-context").textContent = `${providerLabel(next.provider)} · ${apiModeLabel(next.api_mode)} · 本地工作区边界`; $("session-summary").innerHTML = `<strong title="${escapeHtml(session.title || "未命名会话")}">${escapeHtml(taskExcerpt(session.title || "未命名会话", 62))}</strong><br><code>${escapeHtml(session.id || "")}</code><br>${next.active ? `第 ${step}/${maxSteps} 步 · ${escapeHtml(next.current_tool ? toolLabel(next.current_tool) : "等待模型")}` : `${escapeHtml(zh(run.status))} · 验证 ${escapeHtml(zh(session.verification || run.verification))}`}`;
   populateSettings(next); renderPlan(next.plan); renderRun(run, next); if (next.last_error) toast(next.last_error);
 }
 function populateSettings(next) {
@@ -222,7 +225,7 @@ function restoreSessionHistory(history) {
 }
 function appendLiveText(text) { if (!text) return; liveText = `${liveText}${text}`.slice(-12000); const box = $("live-process-output"); box.hidden = false; box.textContent = liveText; box.scrollTop = box.scrollHeight; }
 function clearActivity() { liveText = ""; sessionProcess = null; $("live-process-output").textContent = ""; $("live-process-output").hidden = true; $("timeline").innerHTML = '<div class="empty-state">正在准备执行证据…</div>'; $("activity-details").open = true; }
-function isUsefulExecutionEvent(name, payload) { return ["run_started", "plan_updated", "patch_applied", "verification", "model_error", "final", "browser_run_error", "browser_run_finished", "user_steering_queued", "user_steering_applied", "run_abort_requested"].includes(name) || (name === "tool_result" && payload.success === false); }
+function isUsefulExecutionEvent(name, payload) { return ["run_started", "mode_selected", "plan_updated", "patch_applied", "verification", "model_error", "final", "browser_run_error", "browser_run_finished", "user_steering_queued", "user_steering_applied", "run_abort_requested"].includes(name) || (name === "tool_result" && payload.success === false); }
 function isWorkspaceMutation(name, payload) { return name === "patch_applied" || (name === "tool_result" && payload.success === true && ["apply_patch", "create_file", "write_file"].includes(payload.tool_name)); }
 function scheduleWorkspaceRefresh() {
   if (workspaceRefreshTimer !== null) return;
@@ -238,7 +241,7 @@ function addEvent(event) {
   const trace = event.event === "trace" ? event.payload.trace : null; const name = trace?.event || event.event; const payload = trace?.payload || event.payload || {};
   if (event.event === "workspace_changed") { resetConversation("已切换工作区，并自动创建了一个新的本地会话。旧工作区的会话仍保存在原目录。 "); $("session-title").textContent = "新建会话"; return; }
   if (event.event === "session_created") { resetConversation(); $("session-title").textContent = "新建会话"; return; }
-  if (event.event === "run_started") { appendUserMessage(payload.task); $("session-title").textContent = `会话：${payload.task}`; clearActivity(); }
+  if (event.event === "run_started") { appendUserMessage(payload.task); setSessionTitle(payload.task); clearActivity(); }
   const milestone = conversationMilestone(name, payload); if (milestone) appendSessionProcess(...milestone);
   // The runtime has already filtered assistant_update down to a concrete
   // finding or a reasoned decision. Put it in the one DBAgent turn card;

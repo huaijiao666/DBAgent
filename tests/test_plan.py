@@ -9,7 +9,7 @@ def _plan(
     *,
     goal: str = "Fix the bug",
     criteria: list[str] | None = None,
-    statuses: tuple[str, ...] = ("pending", "pending"),
+    statuses: tuple[str, ...] = ("in_progress", "pending"),
 ) -> dict:
     return {
         "goal": goal,
@@ -39,7 +39,7 @@ def test_initial_plan_is_structured_and_persisted() -> None:
     assert store.plan.goal == "Fix the bug"
     assert store.plan.success_criteria == ("pytest passes",)
     assert [step.status for step in store.plan.steps] == [
-        PlanStepStatus.PENDING,
+        PlanStepStatus.IN_PROGRESS,
         PlanStepStatus.PENDING,
     ]
     assert len(store.history) == 1
@@ -49,18 +49,16 @@ def test_plan_step_status_transitions_are_explicit() -> None:
     store = PlanStore()
     assert store.apply(_plan()).success is True
 
-    progressing = _plan(statuses=("in_progress", "pending"))
     completed = _plan(statuses=("completed", "in_progress"))
     finished = _plan(statuses=("completed", "completed"))
 
-    assert store.apply(progressing).success is True
     assert store.apply(completed).success is True
     assert store.apply(finished).success is True
     assert [step.status.value for step in store.plan.steps] == [
         "completed",
         "completed",
     ]
-    assert len(store.history) == 4
+    assert len(store.history) == 3
 
 
 def test_plan_store_marks_identical_snapshot_as_unchanged() -> None:
@@ -76,6 +74,7 @@ def test_plan_store_marks_identical_snapshot_as_unchanged() -> None:
 
 def test_plan_store_can_resume_an_unfinished_session_plan() -> None:
     original = PlanStore()
+    assert original.apply(_plan()).success
     assert original.apply(_plan(statuses=("completed", "in_progress"))).success
     plan = original.plan
     assert plan is not None
@@ -114,6 +113,22 @@ def test_runtime_code_plan_is_structured_and_can_advance_from_local_evidence() -
     assert store.plan.is_complete
 
 
+def test_runtime_plan_is_a_task_agnostic_provider_failure_fallback() -> None:
+    first = runtime_code_plan("从零构建一个跨端协作平台", chinese=True)
+    second = runtime_code_plan("修复订单导入时的日期解析失败", chinese=True)
+
+    assert [step.step_id for step in first.steps] == [
+        "inspect",
+        "implement",
+        "verify",
+        "deliver",
+    ]
+    assert [step.description for step in first.steps] == [
+        step.description for step in second.steps
+    ]
+    assert first.steps[0].status is PlanStepStatus.IN_PROGRESS
+
+
 def test_invalid_transition_and_plan_drift_are_rejected_without_mutation() -> None:
     store = PlanStore()
     assert store.apply(_plan()).success is True
@@ -130,6 +145,26 @@ def test_invalid_transition_and_plan_drift_are_rejected_without_mutation() -> No
     assert drift.success is False
     assert "goal cannot change" in drift.content["error"]
     assert store.plan.goal == "Fix the bug"
+
+
+def test_plan_store_allows_evidence_based_success_criteria_to_be_appended() -> None:
+    store = PlanStore()
+    assert store.apply(_plan()).success
+
+    expanded = _plan(criteria=["pytest passes", "CLI help command succeeds"])
+
+    assert store.apply(expanded).success
+    assert store.plan is not None
+    assert store.plan.success_criteria[-1] == "CLI help command succeeds"
+
+
+def test_initial_plan_cannot_claim_completion_without_local_evidence() -> None:
+    store = PlanStore()
+
+    result = store.apply(_plan(statuses=("completed", "pending")))
+
+    assert result.success is False
+    assert "initial plan cannot contain completed" in result.content["error"]
 
 
 def test_update_plan_is_a_local_function_tool() -> None:

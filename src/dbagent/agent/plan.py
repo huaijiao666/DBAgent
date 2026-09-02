@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -131,6 +132,8 @@ class PlanStore:
             candidate = TaskPlan.from_mapping(arguments)
             if self._plan is not None:
                 self._validate_update(candidate)
+            else:
+                self._validate_initial(candidate)
         except ValueError as error:
             return ToolResult(
                 success=False,
@@ -188,9 +191,11 @@ class PlanStore:
         assert self._plan is not None
         if candidate.goal != self._plan.goal:
             raise ValueError("plan goal cannot change after the initial plan")
-        if candidate.success_criteria != self._plan.success_criteria:
+        if candidate.success_criteria[: len(self._plan.success_criteria)] != (
+            self._plan.success_criteria
+        ):
             raise ValueError(
-                "success criteria cannot change after the initial plan"
+                "existing success criteria cannot be removed or changed"
             )
 
         previous = {step.step_id: step for step in self._plan.steps}
@@ -207,6 +212,18 @@ class PlanStore:
                 raise ValueError(
                     f"new step {step_id} must start with pending status"
                 )
+
+    @staticmethod
+    def _validate_initial(candidate: TaskPlan) -> None:
+        """Reject a plan that claims completion before any local evidence exists."""
+
+        statuses = [step.status for step in candidate.steps]
+        if PlanStepStatus.COMPLETED in statuses:
+            raise ValueError("an initial plan cannot contain completed steps")
+        if statuses.count(PlanStepStatus.IN_PROGRESS) != 1:
+            raise ValueError(
+                "an initial plan must have exactly one in_progress step"
+            )
 
     @staticmethod
     def _validate_transition(old: PlanStep, new: PlanStep) -> None:
@@ -233,38 +250,48 @@ class PlanStore:
 
 
 def runtime_code_plan(task: str, *, chinese: bool) -> TaskPlan:
-    """Create a deterministic fallback plan for one coding task.
+    """Create the provider-failure fallback, never a task interpretation.
 
-    This is deliberately not a second Planner Agent. The working model may
-    still add steps through ``update_plan``; the fallback simply ensures that
-    runtime evidence always has a stable plan to update and present.
+    The normal CODE path obtains a semantic plan through the working model's
+    native ``update_plan`` call. This fallback exists solely for a provider
+    that repeatedly refuses that protocol. It intentionally has no lexical
+    task classifier: local runtime code must not pretend to understand the
+    user's product request.
     """
 
     if chinese:
         criteria = (
-            "目标功能已落实为工作区中的可运行代码。",
-            "已运行与本次改动匹配的确定性检查，并记录结果。",
-            "最终说明包含变更、验证证据及必要的运行方式。",
+            "请求的核心行为已落实为工作区中的可运行代码。",
+            "已运行与当前改动匹配的确定性检查，并记录结果。",
         )
         steps = (
-            PlanStep("inspect", "确认目标、现有代码和运行约束", PlanStepStatus.IN_PROGRESS),
-            PlanStep("implement", "完成最小且完整的实现或修复", PlanStepStatus.PENDING),
-            PlanStep("verify", "运行针对性的自动化验证", PlanStepStatus.PENDING),
-            PlanStep("deliver", "整理运行方式、变更和验证结论", PlanStepStatus.PENDING),
+            PlanStep("inspect", "检查相关实现、约束和可用验证方式", PlanStepStatus.IN_PROGRESS),
+            PlanStep("implement", "完成必要的实现或修复", PlanStepStatus.PENDING),
+            PlanStep("verify", "运行针对性的确定性验证", PlanStepStatus.PENDING),
+            PlanStep("deliver", "整理变更、运行方式和验证结论", PlanStepStatus.PENDING),
         )
     else:
         criteria = (
             "The requested behavior exists as runnable workspace code.",
-            "A deterministic check appropriate to the change has run and its result is recorded.",
-            "The final response states changes, verification evidence, and required run instructions.",
+            "A deterministic check appropriate to the current change has run.",
         )
         steps = (
-            PlanStep("inspect", "Inspect the goal, existing code, and execution constraints", PlanStepStatus.IN_PROGRESS),
-            PlanStep("implement", "Implement the smallest complete change", PlanStepStatus.PENDING),
+            PlanStep("inspect", "Inspect relevant implementation, constraints, and verification", PlanStepStatus.IN_PROGRESS),
+            PlanStep("implement", "Complete the necessary implementation or fix", PlanStepStatus.PENDING),
             PlanStep("verify", "Run targeted deterministic verification", PlanStepStatus.PENDING),
-            PlanStep("deliver", "Summarize run instructions, changes, and evidence", PlanStepStatus.PENDING),
+            PlanStep("deliver", "Summarize changes, run instructions, and evidence", PlanStepStatus.PENDING),
         )
-    return TaskPlan(goal=task.strip(), success_criteria=criteria, steps=steps)
+    return TaskPlan(goal=_plan_goal(task, chinese=chinese), success_criteria=criteria, steps=steps)
+
+
+def _plan_goal(task: str, *, chinese: bool) -> str:
+    """Use the request's first sentence as a compact, generic plan title."""
+
+    compact = " ".join(task.split())
+    first_sentence = re.split(r"[。！？.!?]", compact, maxsplit=1)[0].strip()
+    candidate = first_sentence or compact
+    limit = 72 if chinese else 96
+    return candidate if len(candidate) <= limit else candidate[: limit - 1].rstrip() + "…"
 
 
 def update_plan_tool(store: PlanStore) -> ToolDefinition:
@@ -291,9 +318,12 @@ def update_plan_tool(store: PlanStore) -> ToolDefinition:
             name="update_plan",
             description=(
                 "Create or update the task plan. Call once near task start with "
-                "the complete goal, immutable success criteria, and ordered steps. "
-                "Update it only when a milestone or step status changes; do not "
-                "replan for every ordinary tool call. Preserve existing step IDs."
+                "the complete goal, observable success criteria, and ordered steps. "
+                "On the first call, set exactly one step to in_progress and no step "
+                "to completed. Later calls may append evidence-based success criteria "
+                "but may not remove or rewrite existing criteria. Update it only when "
+                "a milestone or step status changes; do not replan for every ordinary "
+                "tool call. Preserve existing step IDs."
             ),
             parameters=object_schema(
                 {

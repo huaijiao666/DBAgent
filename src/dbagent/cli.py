@@ -7,7 +7,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from dbagent.agent import AgentLoop, AgentStatus, TaskMode, TaskPlan, resolve_task_mode
+from dbagent.agent import AgentLoop, AgentStatus, TaskMode, TaskPlan
 from dbagent.agent.verification import VerificationStatus
 from dbagent.config import ConfigurationError, DBAgentConfig
 from dbagent.console import safe_print
@@ -75,7 +75,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             workspace=workspace_root,
             model=config.model,
             max_steps=arguments.max_steps,
-            mode=resolve_task_mode(arguments.task, arguments.mode).value,
+            mode=(
+                "auto (semantic)"
+                if arguments.mode == TaskMode.AUTO.value
+                else arguments.mode
+            ),
         )
         trace = TraceRecorder(
             trace_path,

@@ -285,6 +285,11 @@ def _format_console_line(item: Mapping[str, Any]) -> str:
             f"status={payload.get('status')}, calls={payload.get('function_call_count')}"
             f"{token_text}"
         )
+    if event == "mode_selected":
+        return (
+            f"[{elapsed}] step {step} MODE: "
+            f"selected={payload.get('mode')}, source={payload.get('source')}"
+        )
     if event == "model_wait":
         return (
             f"[{elapsed}] step {step} MODEL waiting: "

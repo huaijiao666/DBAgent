@@ -95,6 +95,21 @@ def test_agent_completes_read_test_edit_test_loop(tmp_path: Path) -> None:
     model = ScriptedModelClient(
         [
             _tool_response(
+                "resp_plan",
+                "call_plan",
+                "update_plan",
+                {
+                    "goal": "Fix the calculator bug and verify it.",
+                    "success_criteria": ["The calculator tests pass"],
+                    "steps": [
+                        {"id": "inspect", "description": "Inspect calculator behavior", "status": "in_progress"},
+                        {"id": "fix", "description": "Correct addition", "status": "pending"},
+                        {"id": "verify", "description": "Run calculator tests", "status": "pending"},
+                        {"id": "deliver", "description": "Summarize evidence", "status": "pending"},
+                    ],
+                },
+            ),
+            _tool_response(
                 "resp_read",
                 "call_read",
                 "read_file",
@@ -126,16 +141,17 @@ def test_agent_completes_read_test_edit_test_loop(tmp_path: Path) -> None:
         model,
         create_coding_registry(workspace),
         max_steps=8,
+        mode="code",
     ).run("Fix the calculator bug and verify it.", workspace=workspace)
 
     assert state.status is AgentStatus.COMPLETED
-    assert state.step == 5
-    assert "return left - right" in state.observations[0].content
-    assert state.observations[1].content["return_code"] == 1
-    assert state.observations[2].success is True
-    assert state.observations[2].content["hunks_applied"] == 1
-    assert state.observations[3].content["return_code"] == 0, state.observations[
-        3
+    assert state.step == 6
+    assert "return left - right" in state.observations[1].content
+    assert state.observations[2].content["return_code"] == 1
+    assert state.observations[3].success is True
+    assert state.observations[3].content["hunks_applied"] == 1
+    assert state.observations[4].content["return_code"] == 0, state.observations[
+        4
     ].content
     assert "return left + right" in (workspace / "calculator.py").read_text(
         encoding="utf-8"

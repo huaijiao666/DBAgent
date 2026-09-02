@@ -229,8 +229,18 @@ def test_loop_trace_contains_plan_and_recovery_events(tmp_path: Path) -> None:
             {
                 "id": "inspect",
                 "description": "Inspect files",
-                "status": "completed",
-            }
+                "status": "in_progress",
+            },
+            {
+                "id": "verify",
+                "description": "Verify conclusions",
+                "status": "pending",
+            },
+            {
+                "id": "deliver",
+                "description": "Summarize evidence",
+                "status": "pending",
+            },
         ],
     }
     final = ModelResponse(
@@ -247,6 +257,18 @@ def test_loop_trace_contains_plan_and_recovery_events(tmp_path: Path) -> None:
             _call_response("plan", "plan_call", "update_plan", plan),
             _call_response("unknown_1", "unknown_call_1", "missing", {}),
             _call_response("unknown_2", "unknown_call_2", "missing", {}),
+            _call_response(
+                "finish_plan",
+                "finish_plan_call",
+                "update_plan",
+                {
+                    **plan,
+                    "steps": [
+                        {**step, "status": "completed"}
+                        for step in plan["steps"]
+                    ],
+                },
+            ),
             final,
         ]
     )
@@ -310,6 +332,7 @@ def test_loop_trace_keeps_successful_verification_command_details(
             model,
             create_coding_registry(tmp_path),
             max_steps=3,
+            mode="ask",
             trace=trace,
         ).run("Run the test and report the result.", workspace=tmp_path)
     finally:

@@ -45,7 +45,7 @@ class BrowserAgentController:
         workspace: Path,
         *,
         config_path: Path | None = None,
-        max_steps: int = 60,
+        max_steps: int = 80,
     ) -> None:
         self._lock = threading.RLock()
         self._event_condition = threading.Condition(self._lock)
@@ -566,13 +566,13 @@ class BrowserAgentController:
                 session_context,
                 conversation,
             )
-            initial_plan = session_context.plan
+            initial_plan = _resumable_plan_for_task(session_context.plan, task)
             state = AgentLoop(
                 model_client,
                 create_coding_registry(workspace),
                 max_steps=max_steps,
                 mode=mode,
-                initial_plan=initial_plan if initial_plan is not None and not initial_plan.is_complete else None,
+                initial_plan=initial_plan,
                 trace=trace,
                 run_control=run_control,
             ).run(
@@ -647,6 +647,10 @@ class BrowserAgentController:
                 usage = payload.get("usage")
                 if isinstance(usage, Mapping):
                     self._metrics["token_usage"] = dict(usage)
+            elif event == "mode_selected":
+                selected_mode = payload.get("mode")
+                if selected_mode in {TaskMode.ASK.value, TaskMode.CODE.value}:
+                    self._metrics["task_mode"] = selected_mode
             elif event == "verification":
                 self._metrics["latest_verification"] = {
                     "status": payload.get("status", "unknown"),
@@ -917,7 +921,7 @@ def run_browser_ui(
     workspace: Path,
     *,
     config_path: Path | None = None,
-    max_steps: int = 60,
+    max_steps: int = 80,
     port: int = 0,
     open_browser: bool = True,
 ) -> int:
@@ -950,7 +954,7 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(description="Start the local DBAgent browser UI.")
     parser.add_argument("--workspace", type=Path, default=Path.cwd())
-    parser.add_argument("--max-steps", type=int, default=60)
+    parser.add_argument("--max-steps", type=int, default=80)
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--no-browser", action="store_true")
     arguments = parser.parse_args(argv)
@@ -996,6 +1000,7 @@ def _empty_run_metrics() -> dict[str, Any]:
         "latest_verification": None,
         "changed_files": [],
         "line_changes": {},
+        "task_mode": "auto",
     }
 
 
@@ -1280,9 +1285,33 @@ def _browser_continuation_context(
     return "\n\n".join(sections)
 
 
+def _resumable_plan_for_task(plan: object, task: str):
+    """Keep a saved plan only for an explicit continuation request.
+
+    A browser session may contain an unfinished plan after a model timeout or
+    step limit. The next normal user request can instead be a new feature.
+    Reusing the old goal in that case makes the plan panel misleading and
+    prevents the new run from receiving a task-specific runtime plan.
+    """
+
+    if plan is None or getattr(plan, "is_complete", True):
+        return None
+    normalized = " ".join(task.casefold().split())
+    continuation = (
+        "继续",
+        "继续完成",
+        "继续修复",
+        "恢复",
+        "接着",
+        "continue",
+        "resume",
+    )
+    return plan if normalized.startswith(continuation) else None
+
+
 def _session_title(task: str) -> str:
     compact = " ".join(task.split())
-    return compact if len(compact) <= 72 else compact[:69] + "..."
+    return compact if len(compact) <= 52 else compact[:51] + "…"
 
 
 def _changed_files(state: AgentState) -> list[str]:

@@ -26,8 +26,30 @@ class QueueModelClient:
     def __init__(self, responses: list[ModelResponse]) -> None:
         self.responses = responses
         self.requests = []
+        self.planning_requests = []
+        self.auto_plan_installed = False
+        self.auto_plan_completed = False
 
     def create_response(self, request):
+        if _semantic_plan_only_request(request) and (
+            not self.responses
+            or not any(
+                call.name == "update_plan"
+                for call in self.responses[0].function_calls
+            )
+        ):
+            self.planning_requests.append(request)
+            self.auto_plan_installed = True
+            return _semantic_plan_response()
+        if (
+            self.auto_plan_installed
+            and not self.auto_plan_completed
+            and request.tool_choice == "auto"
+            and self.responses
+            and not self.responses[0].function_calls
+        ):
+            self.auto_plan_completed = True
+            return _semantic_plan_response(completed=True)
         self.requests.append(request)
         if not self.responses:
             raise AssertionError("model called more times than expected")
@@ -66,6 +88,33 @@ def _response(
         output_items=tuple(output_items),
         function_calls=calls,
         usage=None,
+    )
+
+
+def _semantic_plan_only_request(request) -> bool:
+    return request.tool_choice == "required" and {
+        tool.name for tool in request.tools
+    } == {"update_plan"}
+
+
+def _semantic_plan_response(
+    goal: str = "Scripted coding task", *, completed: bool = False
+) -> ModelResponse:
+    status = "completed" if completed else "in_progress"
+    later_status = "completed" if completed else "pending"
+    plan = {
+        "goal": goal,
+        "success_criteria": ["Run deterministic verification after changes"],
+        "steps": [
+            {"id": "inspect", "description": "Inspect relevant code", "status": status},
+            {"id": "implement", "description": "Make the required change", "status": later_status},
+            {"id": "verify", "description": "Run deterministic verification", "status": later_status},
+            {"id": "deliver", "description": "Summarize local evidence", "status": later_status},
+        ],
+    }
+    return _response(
+        "semantic_plan",
+        calls=(FunctionCall("semantic_plan", "update_plan", json.dumps(plan)),),
     )
 
 
@@ -132,7 +181,7 @@ def test_continuation_context_is_not_promoted_to_the_current_task(tmp_path: Path
 
 
 def test_runtime_plan_goal_excludes_continuation_context(tmp_path: Path) -> None:
-    model = QueueModelClient([_response("resp_final", text="暂时无法完成")])
+    model = QueueModelClient([_semantic_plan_response("修复当前测试失败")])
 
     state = AgentLoop(
         model,
@@ -158,6 +207,16 @@ def test_low_signal_read_progress_is_hidden_from_the_conversation() -> None:
     assert _display_progress_text("我会先检查实现。", (call,), chinese=True) == ""
 
 
+def test_context_echo_is_hidden_from_the_conversation_summary() -> None:
+    call = FunctionCall("read", "read_file", "{}")
+    echoed_context = (
+        "[Persistent task context] 从零创建 Snake Arena。"
+        "[Current plan] inspect frontend backend verification"
+    )
+
+    assert _display_progress_text(echoed_context, (call,), chinese=True) == ""
+
+
 def test_reasoned_chinese_progress_is_kept_for_the_execution_summary() -> None:
     text = "已确认工作区为空且 Tkinter 可用，因此先建立可测试的规则层，再添加图形界面。"
 
@@ -168,19 +227,56 @@ def test_reasoned_chinese_progress_is_kept_for_the_execution_summary() -> None:
     ) == text
 
 
-def test_common_zuo_yi_ge_build_request_gets_a_runtime_plan(tmp_path: Path) -> None:
-    model = QueueModelClient([_response("resp_final", text="尚未完成")])
+def test_code_task_starts_with_a_semantic_model_plan(tmp_path: Path) -> None:
+    task = "做一个可运行的俄罗斯方块游戏"
+    model = QueueModelClient([_semantic_plan_response(task)])
 
     state = AgentLoop(
         model,
         create_coding_registry(tmp_path),
         mode="code",
         max_steps=1,
-    ).run("做一个可运行的俄罗斯方块游戏", workspace=tmp_path)
+    ).run(task, workspace=tmp_path)
 
     assert state.plan is not None
-    assert state.plan.goal == "做一个可运行的俄罗斯方块游戏"
-    assert "update_plan" not in [tool.name for tool in model.requests[0].tools]
+    assert state.plan.goal == task
+    assert [tool.name for tool in model.requests[0].tools] == ["update_plan"]
+    assert model.requests[0].tool_choice == "required"
+
+
+def test_repeated_planning_protocol_failures_use_generic_local_fallback(
+    tmp_path: Path,
+) -> None:
+    class RefusingPlanner:
+        def __init__(self) -> None:
+            self.requests = []
+
+        def create_response(self, request):
+            self.requests.append(request)
+            return _response(
+                f"prose_{len(self.requests)}",
+                text="I will begin by inspecting the task.",
+            )
+
+    model = RefusingPlanner()
+    state = AgentLoop(
+        model,
+        create_coding_registry(tmp_path),
+        mode="code",
+        max_steps=2,
+    ).run("Implement a dashboard for inventory alerts.", workspace=tmp_path)
+
+    assert state.status is AgentStatus.MAX_STEPS
+    assert len(model.requests) == 2
+    assert all(_semantic_plan_only_request(request) for request in model.requests)
+    assert state.plan is not None
+    assert state.plan.goal == "Implement a dashboard for inventory alerts"
+    assert [step.description for step in state.plan.steps] == [
+        "Inspect relevant implementation, constraints, and verification",
+        "Complete the necessary implementation or fix",
+        "Run targeted deterministic verification",
+        "Summarize changes, run instructions, and evidence",
+    ]
 
 
 def test_only_distinct_create_file_calls_may_share_one_local_turn() -> None:
@@ -303,8 +399,13 @@ def test_provider_cannot_execute_a_tool_withheld_from_the_current_turn(
 
     assert state.status is AgentStatus.COMPLETED
     assert reads == 0
-    assert state.observations[1].success is False
-    assert "not available in this turn" in state.observations[1].content
+    stale_read = next(
+        observation
+        for observation in state.observations
+        if observation.tool_name == "read_file"
+    )
+    assert stale_read.success is False
+    assert "not available in this turn" in stale_read.content
 
 
 def test_unclassified_failed_local_command_starts_a_repair_diagnosis_phase(
@@ -380,7 +481,7 @@ def test_runtime_plan_does_not_verify_a_partial_explicit_file_delivery(
         ]
     )
 
-    state = AgentLoop(model, registry, mode="code", max_steps=2).run(
+    state = AgentLoop(model, registry, mode="code", max_steps=3).run(
         "Create main.py and README.md, then verify the project.", workspace=tmp_path
     )
 
@@ -773,8 +874,13 @@ def test_write_file_is_withheld_until_patch_fallback_is_needed(tmp_path: Path) -
 
     assert state.status is AgentStatus.COMPLETED
     assert "write_file" not in [tool.name for tool in model.requests[0].tools]
-    assert state.observations[0].success is False
-    assert "withheld by default" in state.observations[0].content
+    withheld_write = next(
+        observation
+        for observation in state.observations
+        if observation.tool_name == "write_file"
+    )
+    assert withheld_write.success is False
+    assert "withheld by default" in withheld_write.content
 
 
 def test_existing_create_file_adds_patch_oriented_recovery_hint(tmp_path: Path) -> None:
@@ -847,11 +953,11 @@ def test_failed_verification_limits_repeated_diagnosis_reads(tmp_path: Path) -> 
             _response("failed", calls=(FunctionCall("test", "run_command", "{}"),)),
             _response("read_1", calls=(FunctionCall("read_1", "read_file", "{}"),)),
             _response("read_2", calls=(FunctionCall("read_2", "read_file", "{}"),)),
-            _response("final", text="Need to fix the test failure."),
+            _response("forced", calls=(FunctionCall("patch", "apply_patch", "{}"),)),
         ]
     )
 
-    state = AgentLoop(model, registry, mode="code", max_steps=4).run(
+    state = AgentLoop(model, registry, mode="code", max_steps=5).run(
         "fix the failing test", workspace=tmp_path
     )
 
@@ -894,11 +1000,11 @@ def test_repeated_failed_verification_does_not_restart_read_budget(
             _response("read_1", calls=(FunctionCall("read_1", "read_file", "{}"),)),
             _response("failed_2", calls=(FunctionCall("test_2", "run_command", "{}"),)),
             _response("read_2", calls=(FunctionCall("read_2", "read_file", "{}"),)),
-            _response("final", text="Need a focused fix."),
+            _response("forced", calls=(FunctionCall("patch", "apply_patch", "{}"),)),
         ]
     )
 
-    state = AgentLoop(model, registry, mode="code", max_steps=5).run(
+    state = AgentLoop(model, registry, mode="code", max_steps=6).run(
         "fix the failing test", workspace=tmp_path
     )
 
@@ -1212,7 +1318,7 @@ def test_repeated_prose_finalization_stops_as_unverified(tmp_path: Path) -> None
     )
 
     assert state.status is AgentStatus.UNVERIFIED
-    assert state.step == 3
+    assert state.step == 5
     assert state.final_answer == "The game is complete."
     assert len(model.requests) == 3
 
@@ -1280,7 +1386,7 @@ def test_model_updates_one_persisted_plan_across_tool_turns(tmp_path: Path) -> N
             {
                 "id": "inspect",
                 "description": "Inspect relevant files",
-                "status": "pending",
+                "status": "in_progress",
             },
             {
                 "id": "explain",
@@ -1326,6 +1432,6 @@ def test_model_updates_one_persisted_plan_across_tool_turns(tmp_path: Path) -> N
     assert len(state.plan_history) == 2
     plan_context = str(model.requests[2].input[1]["content"])
     assert "[Current plan]" in plan_context
-    assert "[pending] inspect" in plan_context
+    assert "[in_progress] inspect" in plan_context
     updated_context = str(model.requests[3].input[1]["content"])
     assert "[completed] inspect" in updated_context
