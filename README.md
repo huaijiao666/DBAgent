@@ -1,34 +1,86 @@
-# DBAgent（DBA）
+# DataBaseAgent（DBAgent）
 
-DBAgent 是一个从零实现的本地、理解代码仓库且能够自验证的 Coding Agent
-Harness。模型只负责推理；文件访问、搜索、patch、命令和验证工具都在指定
-workspace 内由本地程序执行。
+DBAgent 是一个从零实现的、本地运行的 repository-aware、self-verifying
+Coding Agent Harness。模型负责推理和发起原生 function call；代码读取、搜索、
+patch、命令执行、验证、会话管理和可观察性全部由本地 Python runtime 自行实现。
 
-项目内部的 Python package 仍使用 `forge` 命名；面向用户的交互命令是 `DBA`。
+DataBaseAgent（DBAgent）中的 DB 指 Database；项目定位是通用的本地编程智能体。
 
-## 开发状态
+项目内部 package 名为 `dbagent`，面向用户的交互命令是 `DBA`。
 
-这是一个用于学习和面试展示、仍在持续演进的原型（版本 `0.1.0`）。当前
-runtime 已能探索仓库、维护有预算的本地 context 和 plan、调用本地工具、
-原子应用 patch、执行确定性验证、从失败中恢复，并写出 JSONL 执行 trace。
+> 开发状态：用于软件工程项目展示与学习的可运行原型（`0.1.0`），不是对
+> Codex 或 Claude Code 的能力、隔离性或稳定性的等价替代品。
 
-项目明确不使用 LangChain、LlamaIndex、任何 Agent SDK 或其他现成的
-coding-agent runtime。
+## 项目目标与边界
 
-详细模块边界、状态归属和安全限制见 [架构说明](docs/architecture.md)。
+给定一个用户选择的本地 workspace，DBAgent 可以探索代码仓库、维护显式任务计划、
+通过本地工具修改代码、执行确定性检查，并基于测试/编译/lint 结果决定是否验证完成。
+
+```text
+用户（CLI / TUI / Browser UI）
+            │
+            ▼
+      DBAgentRepl / BrowserAgentController
+            │
+            ▼
+AgentLoop ─ ContextManager ─ AgentState / TaskPlan
+    │              │                  │
+    │              │                  └─ verification / recovery / termination
+    ▼              ▼
+OpenAI Responses 或 Chat Completions 兼容适配层
+    │
+    ▼
+ToolRegistry ─ Workspace / PatchApplier / CommandExecutor / RepositoryIndex
+    │
+    ▼
+TraceRecorder（本地 JSONL）→ CLI、TUI、Browser UI
+```
+
+### 题目约束符合性
+
+- 不使用 LangChain、LlamaIndex、OpenAI Agents SDK、Claude Agent SDK、
+  AutoGen、CrewAI 或其他 Agent framework / SDK。
+- 不把 Codex CLI、Claude Code 或现成 Coding Agent 当作 runtime。
+- 官方 `openai` Python client 只承担模型 API 通信；默认优先使用 Responses API。
+- 不启用 Code Interpreter、hosted shell、Files API、web search 或服务端 patch。
+- 模型只能请求项目自己定义的 native function tools；每个工具实际在本机执行。
+- 不使用 `previous_response_id` 或服务端 conversation state；每轮 prompt 由本地
+  `ContextManager` 和会话状态明确构造。
+
+详细模块说明见 [架构说明](docs/architecture.md)；三个可复现的 scripted
+端到端演示任务见 [E2E demo](docs/e2e-demo.md)。
+
+### 推免提交材料
+
+本文件是面向使用者与考官的完整项目说明。考核要求的精简 `README.txt` 已放在
+[submission/README.txt](submission/README.txt)：提交前只需将其中的仓库地址占位符
+替换成你的公开仓库 URL。两分钟 MP4 的任务选择、录屏步骤和逐段讲稿见
+[视频演示脚本](docs/video-demo-script.md)。这些材料不含 API key、URL 或本地凭据。
+
+## 当前能力
+
+| 能力 | 本地实现 | 关键事实 |
+| --- | --- | --- |
+| 仓库探索 | `list_files`、`read_file`、`search_text` | 路径 canonicalize，并限制在 workspace 内 |
+| Python 仓库理解 | scanner、ignore rules、AST symbol index | 提供 repo map、symbol 搜索与局部 symbol 阅读；不是完整静态分析 |
+| 代码编辑 | `apply_patch` 为主，`create_file` / `write_file` 为过渡接口 | 多文件 exact-context patch 先整体校验；失败不留下半应用状态 |
+| 本地执行 | `run_command`、`git_diff` | argv 无 shell、timeout、输出上限、清理后的子进程环境 |
+| 任务控制 | `TaskPlan`、`AgentState`、`max_steps` | plan、步骤、观察、验证和终止状态均为显式数据 |
+| 自验证 | verification tracker、重复失败检测、recovery hint | 模型说“完成”不等于 `VERIFIED`；需要当前确定性证据 |
+| 长任务上下文 | `ContextManager`、`SessionContext` | 本地预算、确定性压缩、保留关键错误/修改/验证事实 |
+| 可观察性 | `TraceRecorder`、CLI、TUI、浏览器 dashboard | JSONL trace、计划、工具、变更、验证、耗时与 token 指标 |
 
 ## 环境要求
 
-- Python 3.11 或更高版本
-- 配置的 OpenAI-compatible provider 对应的 API key
-- Git 是可选依赖，但 `git_diff` 工具和端到端 demo 需要它
-
-runtime 依赖是官方 `openai` Python client；开发依赖放在
-`pyproject.toml` 的 `dev` extra 中。
+- Python 3.11 或更高版本。
+- 可用的 OpenAI 或 OpenAI-compatible provider 凭据。
+- Git 可选；`git_diff` 与 E2E demo 需要 Git。
+- runtime 唯一第三方依赖是官方 `openai` Python client；开发测试依赖在
+  `pyproject.toml` 的 `dev` extra 中。
 
 ## 安装
 
-在 repository 根目录创建虚拟环境，并以 editable 模式安装 Forge：
+推荐以 editable 模式安装：这样 `DBA` 能稳定定位本 checkout 根目录的本地配置文件。
 
 ### PowerShell（Windows）
 
@@ -39,7 +91,7 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
-### macOS/Linux shell
+### macOS/Linux
 
 ```bash
 python3.11 -m venv .venv
@@ -48,46 +100,50 @@ python -m pip install --upgrade pip
 python -m pip install -e '.[dev]'
 ```
 
-安装后会提供三个命令：
+安装后提供以下入口：
 
-- `forge` — 运行 coding-agent loop。
-- `forge-smoke` — 发送一次文本请求，检查模型连接。
-- `DBA` / `dba` — 启动多轮本地 coding-agent REPL。
-- `forge-web` — 直接启动本地浏览器 dashboard（等价于 `DBA --ui web`）。
+- `dbagent`：一次性本地 Coding Agent run。
+- `dbagent-smoke`：一次 stateless 模型连接检查。
+- `DBA` / `dba`：多轮本地 Coding Agent REPL。
+- `dbagent-web`：直接启动浏览器 dashboard。
 
-### Windows 一次性注册 DBA
+### Windows：在任意工作目录输入 `DBA`
 
-如果希望在任意工作目录直接输入 `DBA`，在本 repository 根目录执行一次：
+在 repository 根目录执行一次：
 
 ```powershell
 .\scripts\install-dba.ps1 -Install
 ```
 
-脚本会确保 `.venv` 和 editable package 存在，并把本项目的 `.venv\Scripts`
-加入当前用户 PATH。之后请打开一个新的终端，即可在任意目录运行：
+该脚本创建/复用本项目的 `.venv`、以 editable 模式安装 package，并将该虚拟环境的
+`Scripts` 目录加入当前用户 PATH。重新打开终端后即可：
 
 ```powershell
-cd C:\any\workspace
+cd C:\your\workspace
 DBA
 ```
 
-脚本不会读取、写入或打印 API key。`DBA` 会优先读取 repository 根目录中**被 Git
-忽略**的 `config.toml`；也可用 `FORGE_CONFIG_PATH` 或 `--config-path` 指向其他本地
-文件。找不到时才回退到当前进程环境变量。
+安装脚本不会写入、打印或上传 API key。
 
 ## 配置与密钥
 
-`DBA` 的 provider 配置可放在 repository 根目录中两个**只限本机**的文件：
+### 推荐的 DBA 本地配置
 
-- `config.toml`：OpenAI-compatible provider 的 URL、模型和 token；可从
-  `config.toml.example` 复制后填写。
-- `api_key.txt`：DeepSeek API key，仅一行；`api_key.txt.example` 是空白安全模板。
+在**本 repository 根目录**创建两个仅供本机使用的文件：
 
-它们都被 `.gitignore` 忽略，绝不会被 package、trace、session 或 README 读取/写入。
-用户 clone 后自行复制模板或创建这两个文件并填写值。`.env.example` 只列出环境变量名
-和安全默认值；不要把真实凭据写入 `.env`、源代码、测试、Git、README 或 trace。
+- `config.toml`：configured OpenAI-compatible provider 的 URL、模型与 bearer token。
+- `api_key.txt`：DeepSeek key；文件只能包含一行非空 key。
 
-一个 token 为空的 `config.toml` 模板示例：
+真实文件都被 `.gitignore` 忽略。clone 后请复制安全模板并自行填写，不要把真实值加入
+Git、README、测试、trace 或 session：
+
+```powershell
+Copy-Item .\config.toml.example .\config.toml
+Copy-Item .\api_key.txt.example .\api_key.txt
+# 然后用本机编辑器填写 config.toml 的 token；api_key.txt 只填写一行 DeepSeek key。
+```
+
+`config.toml.example` 不含真实 token；`api_key.txt.example` 是空文件。可用结构如下：
 
 ```toml
 model_provider = "openai_compatible"
@@ -99,423 +155,270 @@ base_url = "https://provider.example/v1"
 experimental_bearer_token = "<fill-your-local-token>"
 ```
 
-| 变量 | 默认值 | 含义 |
-| --- | --- | --- |
-| `OPENAI_API_KEY` | 必填 | 官方 client 读取的 API key |
-| `FORGE_MODEL` | `gpt-5.6-sol` | 发送给 provider 的模型名 |
-| `FORGE_REASONING_EFFORT` | `medium` | 可选 `none`、`low`、`medium`、`high`、`xhigh`、`max` |
-| `FORGE_API_MODE` | `responses` | `responses` 或 `chat_completions` |
-| `FORGE_BASE_URL` | provider 默认值 | 可选的绝对 `http(s)` base URL |
-| `FORGE_DEEPSEEK_API_KEY` | 空 | DeepSeek key 的可选环境覆盖 |
-| `FORGE_DEEPSEEK_KEY_FILE` | `./api_key.txt` | DeepSeek key 文件的可选显式路径 |
-| `FORGE_CONFIG_PATH` | 空 | 可选的 provider TOML 显式路径 |
+此 TOML 格式用于兼容 configured provider；DBA 将 token 只读入当前进程的
+`DBAgentConfig`，并使用 Chat Completions compatibility adapter。它不会写回环境变量、
+session 或 trace。
 
-PowerShell 临时会话示例：
+可在提交前确认 Git 不会跟踪本机凭据：
+
+```powershell
+git check-ignore -v -- config.toml api_key.txt
+```
+
+此外，`config.toml`、`api_key.txt`、`.env*` 都被 Agent 文件工具、repository scanner
+和浏览器文件预览主动屏蔽；这不只依赖 `.gitignore`。
+
+### 配置优先级
+
+`DBA`（CLI/TUI/Browser UI）按以下顺序加载 configured provider：
+
+1. `--config-path PATH`
+2. `DBAGENT_CONFIG_PATH`（兼容旧名称 `DBAGENT_BACKUP_CONFIG`）
+3. 本 repository 根目录、且被忽略的 `config.toml`
+4. 当前进程环境变量
+
+DeepSeek 预设按以下顺序读取 key：
+
+1. `DBAGENT_DEEPSEEK_API_KEY`
+2. `DBAGENT_DEEPSEEK_KEY_FILE`
+3. 本 repository 根目录、且被忽略的 `api_key.txt`
+
+`dbagent` 和 `dbagent-smoke` 刻意只从**当前进程环境**创建 `DBAgentConfig`；它们不自动读取
+本地 TOML。这让一次性 CLI 与 smoke test 的凭据来源完全显式。
+
+| 环境变量 | 默认值 | 用途 |
+| --- | --- | --- |
+| `OPENAI_API_KEY` | 空 | `dbagent` / `dbagent-smoke` 或 DBA 环境回退使用的 API key |
+| `DBAGENT_MODEL` | `gpt-5.6-sol` | 模型名 |
+| `DBAGENT_REASONING_EFFORT` | `medium` | `none`、`low`、`medium`、`high`、`xhigh`、`max` |
+| `DBAGENT_API_MODE` | `responses` | `responses` 或 `chat_completions` |
+| `DBAGENT_BASE_URL` | provider 默认 | 可选 OpenAI-compatible base URL |
+| `DBAGENT_CONFIG_PATH` | 空 | provider TOML 的显式路径 |
+| `DBAGENT_DEEPSEEK_API_KEY` | 空 | DeepSeek key 的显式覆盖 |
+| `DBAGENT_DEEPSEEK_KEY_FILE` | 空 | DeepSeek key 文件的显式路径 |
+
+使用纯环境变量的例子：
 
 ```powershell
 $env:OPENAI_API_KEY = "<set-this-out-of-band>"
-$env:FORGE_MODEL = "gpt-5.6-sol"
-$env:FORGE_REASONING_EFFORT = "medium"
-$env:FORGE_API_MODE = "responses"
+$env:DBAGENT_MODEL = "gpt-5.6-sol"
+$env:DBAGENT_REASONING_EFFORT = "medium"
+$env:DBAGENT_API_MODE = "responses"
 ```
 
-POSIX shell 等价配置：
+## 快速开始
 
-```bash
-export OPENAI_API_KEY='<set-this-out-of-band>'
-export FORGE_MODEL='gpt-5.6-sol'
-export FORGE_REASONING_EFFORT='medium'
-export FORGE_API_MODE='responses'
-```
+### 一次性任务
 
-如果兼容 provider 只提供 Chat Completions 而没有 Responses，请设置
-`FORGE_BASE_URL` 和 `FORGE_API_MODE=chat_completions`。conversation 仍然由
-Forge 在本地组装和维护；两个 adapter 都不使用 `previous_response_id` 或
-服务端 conversation state。
-
-## 运行 Agent
-
-任务是位置参数。未传 `--workspace` 时，`forge` 和 `DBA` 都严格使用启动命令时的
-当前目录，避免父目录的 `.git`、`pytest.ini` 或 README 意外扩大 workspace。确实
-需要从嵌套 package 向上搜索项目根时，再显式传入 `--discover-workspace`：
+`dbagent` 的 workspace 默认是**启动命令时的精确当前目录**；不会自动上溯到父目录。
 
 ```powershell
-forge "inspect this repository and explain its architecture" `
-  --workspace . `
-  --max-steps 16
+cd C:\your\workspace
+dbagent "inspect this repository and explain its architecture" --max-steps 16
+```
+
+若确实需要从嵌套目录显式寻找项目根：
+
+```powershell
+dbagent "run the focused tests and explain the failure" --discover-workspace
 ```
 
 常用选项：
 
 ```text
 --workspace PATH       workspace 根目录（默认：精确当前目录）
---discover-workspace   显式向父目录搜索最近项目根
---max-steps N          模型轮数硬上限（默认：60）
+--discover-workspace   显式向上寻找最近的项目根
+--max-steps N          每次 run 的模型轮数硬上限（默认：60）
 --mode MODE            auto、ask 或 code（默认：auto）
---trace-file PATH      workspace 内的 JSONL trace 路径
-                       （默认：.forge/trace.jsonl）
+--trace-file PATH      workspace 内 JSONL trace 路径（默认：.dbagent/trace.jsonl）
 ```
 
-终端 UI 会显示 plan 更新、工具调用、精简 observation、改动文件、验证状态、
-耗时，以及 provider 返回的模型 token 使用量。成功运行会输出 `VERIFIED`；
-触及轮数硬上限时输出 `INCOMPLETE`，并以状态码 `2` 退出。
+当达到 `max_steps` 时，Agent 明确输出 `INCOMPLETE` 并以状态码 `2` 退出；不会伪装成
+验证成功。
 
-界面采用无第三方依赖的行式终端 dashboard，适合直接录制演示视频；在真实
-TTY 中自动启用颜色，被重定向到文件或 CI 时保持纯文本。设置 `NO_COLOR=1`
-可以强制关闭颜色。示意输出：
-
-```text
-+-- DBAgent coding session ---------------------------------------------+
-| Task      修复 calculator.py 中的除零错误                              |
-| Workspace C:\demo\repo                                                 |
-| Model     gpt-5.6-sol                                                   |
-| Budget    12 model turns                                                |
-+-------------------------------------------------------------------------+
-.    0.4s |  1/12 | 检查  分析中  context=812/7500~tok  recent=2  compact=0
-->   1.1s |  1/12 | 检查  读取文件  calculator.py
-OK   1.2s |  1/12 | 完成: 读取文件  42 source lines returned  path=calculator.py
-#    3.5s |  4/12 | 修改完成  files=['calculator.py']  hunks=1
-OK   5.8s |  5/12 | 验证 VERIFY  status=passed  kind=test  return_code=0
-
-+-- Run summary ----------------------------------------------------------+
-| Status         VERIFIED                                                 |
-| Steps          5/12                                                     |
-| Verification   passed                                                   |
-| Plan           3/3 steps completed                                      |
-| Elapsed        5.8s                                                     |
-| Files changed  calculator.py                                            |
-+-------------------------------------------------------------------------+
-```
-
-## DBA 多轮聊天 REPL
-
-完成上面的 Windows 注册后，在任意工作目录运行：
+### 多轮 REPL
 
 ```powershell
+cd C:\your\workspace
 DBA --workspace .
 ```
 
-DBAgent 提供三种明确的本地展示模式，三者使用**完全相同**的 Agent loop、工具、
-session checkpoint 和 JSONL trace；差别只有交互呈现方式：
-
-```powershell
-# 默认：可滚动、适合录屏、重定向和 CI 的 CLI dashboard
-DBA --ui cli
-
-# 全屏：交互式 TTY 中的 alternate-screen dashboard
-DBA --ui tui
-
-# 浏览器 dashboard：本地 loopback 服务 + 浏览器三栏工作台
-DBA --ui web
-```
-
-TUI 不引入 Agent framework 或 hosted execution：它用标准库 ANSI alternate screen
-渲染 task、当前 plan、近期活动、文件改动、verification 和运行中的 steering 输入。
-退出时会恢复原来的终端内容。`--ui tui` 只在真实交互式 TTY 中可用；重定向输出、
-CI 或不支持 ANSI 的终端请使用 `--ui cli`。
-
-### 浏览器 dashboard
-
-`--ui web` 会在 `127.0.0.1` 启动一个带随机访问 token 的本地服务，并自动打开
-浏览器（不希望自动打开时使用 `--no-browser`）。它提供三栏工作台：左侧是
-workspace 与仓库树，中间是对话、实时执行 timeline 和任务输入，右侧是 plan、
-verification、改动文件与可刷新的 Git diff。运行中会显示当前 step、active tool、
-context/model token、耗时；可用 `Send guidance` 把补充约束排入下一安全边界，也可用
-`Stop` 请求 Agent 协作退出。
-
-浏览器工作台的对话区和执行时间线各自滚动，新增消息只会在你已经接近底部时自动跟随，
-不会把正在阅读的内容强行卷走。左、右两条竖向分隔条和对话/时间线之间的横向分隔条都可
-拖动（也支持方向键微调），布局会保存在当前浏览器的 `localStorage` 中；窄窗口会自动切换
-为单列布局。界面采用浅色、低装饰的代码工作台风格，重点突出文件、计划、验证和实际变更。
-
-```powershell
-# 在当前目录启动，自动选择空闲端口
-DBA --ui web --workspace .
-
-# 固定端口并手动复制终端输出的 localhost URL
-DBA --ui web --workspace . --port 8765 --no-browser
-```
-
-浏览器出于安全策略不能把“文件夹选择器”直接转换成服务器路径，因此 workspace
-输入框接受的是**运行 DBA 的这台机器上的绝对路径**；提交后后端会 canonicalize
-并验证目录存在。页面不会接收 API key，所有模型请求、文件访问、patch、命令和
-trace 仍在本地 Python 进程中执行。服务只绑定 loopback，随机 token 仅用于阻止
-同机其他页面随意调用控制 API；关闭终端进程即可停止服务。
-
-直接运行 `DBA` 与 `DBA --workspace .` 等价：默认 workspace 就是启动命令时的
-**精确当前目录**，不会因为父目录存在 `.git`、`pytest.ini` 或 `README.md` 而悄悄
-扩大权限范围。确实希望从 `src/package` 向上寻找项目根时，才显式使用：
-
-```powershell
-DBA --discover-workspace
-```
-
-如果环境配置中的模型在当前 provider 上不可用，可以只对本次进程显式覆盖，
-而不修改环境：
-
-```powershell
-DBA --workspace . --model gpt-5.6-sol --reasoning-effort medium
-```
-
-API key 和 URL 仍由当前启动进程的环境提供；覆盖参数不会写入环境或配置文件。
-
-如果没有注册全局命令，也可以在 repository 内激活虚拟环境后运行同一个命令。
-
-Windows 命令名不区分大小写；在 macOS/Linux 中也可以使用小写入口：
-
-```bash
-dba --workspace .
-```
-
-启动后会进入 `DBA[auto]>` 提示符。普通文本会触发一次完整的本地 Agent loop，
-然后返回提示符等待下一轮；当前会话的用户消息和助手回答会由本地
-`LocalConversation` 保留并按预算裁剪，不依赖 provider 的服务端历史。每轮
-结束时，`SessionContext` 还会结构化保存最新 plan、verification 状态、recovery
-hint，以及 patch、测试、命令和错误等关键工具 observation；下一轮会将这些
-摘要重新注入 prompt。代码发生修改后，之前的通过验证会自动标为 `stale`，
-避免把旧证据误当成当前结果。
-
-每轮请求会原子保存到 workspace 的 `.forge/sessions/<SESSION_ID>.json`，其中只
-包含裁剪后的对话、plan、验证摘要和关键 observation，并沿用 trace 的敏感值
-脱敏规则。重新打开同一工作目录后，使用 `/sessions` 查看 ID，再用
-`/resume <ID>` 精确恢复；`/resume #` 可按列表序号恢复；`/resume latest` 恢复最近更新的会话。旧版本的
-`.forge/session.json` 会作为 `legacy` 会话继续可读。所有文件均受 `.gitignore`
-保护，不使用 provider 的服务端 conversation state。
-
-每次启动都会创建一个标记为 `[new]` 的空 session ID，**不会自动恢复历史**。
-成功 `/resume <ID>` 后终端会显示 `Resumed context` 面板，明确列出恢复的标题、
-聊天轮数、verification、关键 observation 数量以及是否恢复了 plan；若存在 plan
-和验证摘要，也会紧接着可视化展示。
-
-长任务会在每个完成的 Agent step 后写入本地 checkpoint；即使 provider 失败或用户
-中断，已完成的 plan 更新、验证结果和关键工具 observation 也会保存为
-`Checkpoint: interrupted`，之后可用 `/resume <ID>` 恢复。尚未返回的那一次模型
-请求本身无法从中间继续，但其用户任务文本在请求前已保存。
-
-当上一个 code 任务留下未完成 plan，用户明确输入“继续/接着”或 `continue/resume`
-时，REPL 会把该 plan 恢复为下一轮的真实 runtime state，而不只是复制一段文本；
-上轮若为 `failed/stale` 验证，本轮在取得新的确定性证据前不能声称完成。普通的
-新请求不会自动继承旧 plan，避免把无关任务绑在一起。
+启动 workspace 默认同样是精确当前目录。`DBA --discover-workspace` 是唯一会向上选择
+项目根的方式。
 
 内置命令：
 
 ```text
-/models                显示可直接选择的模型别名与 provider
-/model                 显示模型别名；也可继续输入 provider 的原始模型名
-/model luna            使用启动时环境配置的 gpt-5.6-luna
-/model terra           使用启动时环境配置的 gpt-5.6-terra
-/model sol             使用启动时环境配置的 gpt-5.6-sol
-/model deepseek-flash  使用 DeepSeek V4 Flash
-/model deepseek-pro    使用 DeepSeek V4 Pro
-/reasoning             查看当前 reasoning effort 和可用等级
-/reasoning high        对后续请求设置 reasoning effort
-/steps [N]             查看或设置本 REPL 后续任务的 model turn 上限
-/mode                  查看当前任务模式
-/mode auto             自动区分问答与编码任务
-/mode ask              只做仓库调查和回答，不开放编辑工具
-/mode code             开放规划、patch、命令和验证能力
-/status                查看模型、会话轮数和最近任务状态
-/context               查看最近一次请求的本地 context 预算和压缩统计
-/capabilities          查看当前 provider 实际生效的工具/推理能力
-/plan                  查看当前会话保留的最新结构化 plan
-/sessions              列出当前 workspace 的会话 ID、时间、轮数和验证状态
-/resume <ID|#>         按完整 ID、唯一前缀或会话列表序号恢复
-/resume latest         恢复最近更新的会话
-/continue [N]          继续当前未完成 plan；可选地设定新的 step budget
-/new                   开始新会话并保留已有会话
-/clear                 清空并删除当前会话，保留其他会话（不会删除代码）
-/help                  显示帮助
-/exit                  退出 DBA
+/models                         显示模型预设
+/model luna|terra|sol           选择 configured provider 的模型预设
+/model deepseek-flash|deepseek-pro
+                                选择当前 DeepSeek 兼容预设
+/reasoning [LEVEL]              查看或设定后续请求的 reasoning effort
+/steps [N]                      查看或设定每次任务的 step budget
+/mode auto|ask|code             选择任务模式
+/status /context /capabilities  查看状态、context 预算、实际 provider 能力
+/plan                           显示保留的结构化计划
+/sessions                       列出当前 workspace 的已保存会话
+/resume <ID|#|latest>           恢复指定会话
+/continue [N]                   继续未完成 plan，可同时调整预算
+/new                            创建新会话，保留原会话
+/clear                          删除当前会话 checkpoint，不删除用户代码
+/steer <要求> 或 /followup <要求>
+                                在执行期间把指导放入下一安全边界
+/abort                          请求在下一模型/工具边界停止
+/help /exit                     查看帮助 / 退出
 ```
 
-在正常交互式终端的一次任务执行期间，也可直接输入 `/steer <指令>`（或直接输入
-一行普通文本）补充下一安全边界的用户指令；输入 `/abort` 会阻止下一次模型请求或
-本地工具执行。它不会伪称能取消正在飞行中的 HTTP 请求或已启动的子进程。Responses
-API 路径还会显示经过小批量整理的服务端文本增量；工具参数不会在完成前被当作可执行
-数据展示或执行。
+每轮开始前，用户任务会先写入本地 checkpoint；完成后会保存裁剪后的对话、plan、关键
+observation 与验证状态到 `.dbagent/sessions/<SESSION_ID>.json`。`/resume` 恢复的是
+本地上下文，不会声称恢复一个中断中的 HTTP 请求或子进程。
 
-为复现本项目已测试的开发依赖，可在新虚拟环境中执行：
+### 三种展示方式
+
+三种 UI 使用同一个 AgentLoop、ToolRegistry、SessionStore 和 JSONL trace，只改变展示层：
 
 ```powershell
-python -m pip install -r requirements.lock
-python -m pip install -e .
-python -m pytest
+DBA --ui cli    # 默认：可滚动的终端 dashboard
+DBA --ui tui    # 交互式 TTY 的 ANSI 全屏 dashboard
+DBA --ui web    # loopback 浏览器工作台
 ```
 
-`max_steps` 不是模型能力的固定上限，而是 DBAgent 每个本地 Agent run 的安全预算：
-它避免模型、provider 或工具异常时无限消耗时间和额度。普通命令默认 60 步；可用
-`DBA --max-steps 64`、REPL 中的 `/steps 64`，或在已中断任务后直接
-`/continue 64`。续跑会恢复本地 plan、关键 observation 和验证状态，但开始一个新的、
-明确受限的 Agent run，而不是悄悄无限循环。
+- CLI 适合录屏、重定向输出和 CI。
+- TUI 只在交互式 TTY 可用；退出后恢复原终端内容。
+- 浏览器模式仅绑定 `127.0.0.1`，使用随机本地访问 token；浏览器从不接收 provider key。
 
-`DBA` 不再扫描用户目录或任何聊天软件备份；它只从 repository 根目录的忽略文件
-`config.toml` 读取默认 provider 配置，或从 `FORGE_CONFIG_PATH`、兼容的
-`FORGE_BACKUP_CONFIG`、`--config-path` 和当前进程环境接收显式配置。凭据只进入当前
-进程内存，不会写入 session、trace 或 Git。
-
-选择 `/model deepseek-flash` 或 `/model deepseek-pro` 时，DBA 会优先读取
-`FORGE_DEEPSEEK_API_KEY`；没有时读取 repository 根目录中被忽略的 `api_key.txt`，并使用
-`https://api.deepseek.com` 的 Chat Completions 兼容接口。该 key 不写入 session、trace、终端输出或本 repository；切回 `luna`、
-`terra` 或 `sol` 会恢复本次启动时的 configured provider 凭证和 URL。DeepSeek 的两个预设使用显式的
-`deepseek` provider policy。由于该兼容接口在 thinking 与多轮工具历史组合下有
-额外协议要求，DBAgent 的本地工具任务会明确显示并强制使用 `thinking disabled`；
-`/reasoning` 只作为偏好保存，不代表 DeepSeek 工具轮实际启用了该能力。这样不会
-把不完整的 `reasoning_content` 当成可恢复的本地上下文，也不会把文本 DSML 误当作
-工具调用执行。DeepSeek 预设应视为 experimental compatibility，重要演示优先使用
-稳定的 Responses provider。
-
-Windows 是默认运行路径。WSL 可以单独安装 Python、editable package 和 provider
-配置，但它不会自动复用 Windows 的 `.venv` 或 Windows 路径；当前项目没有必要
-为了命令兼容性强制切换到 WSL。
-
-每一轮仍然使用现有的 `apply_patch`、`run_command`、repository map 和
-deterministic verification，因此多轮 REPL 只是交互入口，不是第二个
-Planner 或第二套 Agent runtime。
-
-`auto` 模式会将“怎么运行、有什么功能、解释架构”等请求路由到 `ask`：不创建
-装饰性计划、不暴露编辑工具，收集足够证据后强制生成答案。带有“修复、实现、
-添加、修改代码”等明确意图的请求进入 `code`：仅对真正的多步骤任务维护 plan，
-修改后必须用本地测试、编译器或 linter 形成当前验证证据。自动分类是启发式的，
-重要任务可以用 `/mode` 明确覆盖。
-
-## 连接 smoke test
-
-设置 `OPENAI_API_KEY` 后运行：
+浏览器工作台支持原生目录选择器或手动路径输入；切换工作区会自动创建一个新的空会话，
+旧会话保留在原 workspace。仓库树和变更列表可打开多标签文件预览；会话恢复会重建历史
+对话、最终回答以及压缩后的本地执行摘要。plan 保留至新的 plan 取代它，变更面板显示文件
+数量与 `+/-` 行数。布局分隔条可拖动，并保存在浏览器 `localStorage` 中。
 
 ```powershell
-forge-smoke
+# 自动选择本机空闲端口并打开浏览器
+DBA --ui web --workspace .
+
+# 指定端口；自行打开终端打印的 localhost URL
+DBA --ui web --workspace . --port 8765 --no-browser
 ```
 
-也可以传入自定义 prompt：
+浏览器模式中的模型和 reasoning effort 应在页面设置控件中选择。`DBA --model` 与
+`--reasoning-effort` 是 CLI/TUI 启动覆盖；当前 browser launcher 不转发这两个参数。
+
+## 模型通信与 provider 兼容性
+
+默认模型为 `gpt-5.6-sol`，默认 reasoning effort 为 `medium`。Responses adapter 和
+Chat Completions compatibility adapter 都只接受普通文本与项目自定义的 function calls；
+它们不启用任何 hosted execution/file/search 能力。
+
+对于只提供 Chat Completions 的 compatible provider，可设置：
 
 ```powershell
-forge-smoke "Reply with one short sentence."
+$env:DBAGENT_BASE_URL = "https://provider.example/v1"
+$env:DBAGENT_API_MODE = "chat_completions"
 ```
 
-该命令只执行一次 stateless 请求，并打印模型、response ID、状态和文本；不会
-运行 repository 工具。没有 API key 时，会在发出请求前清晰失败。
+DeepSeek `deepseek-flash` / `deepseek-pro` 是实验性兼容路径。某些 provider 在 thinking
+与多轮 tool history 组合时要求回传专有字段；DBAgent 的工具轮因此遵守更保守的本地协议，
+且只执行原生 function call。若 provider 返回文本形式的伪工具标记，runtime 会安全报错，
+不会把文本当命令执行。重要演示优先选择已验证的 Responses provider。
 
-## 临时 provider 环境（PowerShell）
+### 手工连接 smoke test
 
-可选启动脚本
-[`scripts/forge-isolated.ps1`](scripts/forge-isolated.ps1)
-适合只使用当前 PowerShell 进程中已有的 provider 环境变量；它不修改调用方环境：
+`dbagent-smoke` 会消耗一次模型调用额度，并且只读取环境变量：
 
 ```powershell
-.\scripts\forge-isolated.ps1 `
-  -Task "inspect this repository and explain its architecture" `
-  --workspace . --max-steps 16
+dbagent-smoke
+dbagent-smoke "Reply with one short sentence."
 ```
 
-若需要自动读取个人 TOML，请直接使用 `DBA`；该脚本仍适合 CI 或显式环境配置。
+它不会运行 repository tools。缺少 `OPENAI_API_KEY` 时会在请求前失败。
 
-## 本地工具与安全模型
+## 本地工具、安全与验证
 
-模型只能请求以下由本地 registry dispatch 的 function tools：
+模型可请求的 native function tools：
 
-- 只读探索：`list_files`、`read_file`、`search_text`
-- Repository intelligence：`get_repo_map`、`search_symbol`、`read_symbol`
-- 编辑与检查：`apply_patch`、`create_file`、`write_file`、`git_diff`
-- 执行与规划：`run_command`、`update_plan`
+- 探索：`list_files`、`read_file`、`search_text`
+- 仓库理解：`get_repo_map`、`search_symbol`、`read_symbol`
+- 编辑：`apply_patch`、`create_file`、`write_file`、`git_diff`
+- 执行与计划：`run_command`、`update_plan`
 
-所有文件路径都会 resolve 并检查是否仍位于选定 workspace 内，包括 symlink
-escape 检查。`apply_patch` 会在写入任何文件前校验全部 hunk；如果后续 replace
-失败，会回滚已经替换的文件。命令具有 timeout、有限长度的 stdout/stderr 返回值和
-过滤后的环境变量；它使用 argv 而非 shell，但目前**不是 OS 级沙箱**，不应在不可信
-repository 或高权限机器上当作隔离边界。
+关键安全策略：
 
-patch 被拒绝时终端会展示具体原因，例如 `context did not match`、`context is
-ambiguous` 或 `replacement makes no change`。失败是原子的；runtime 会要求模型
-不要重复同一补丁，而是缩小唯一上下文，必要时只对小文件使用 `write_file`
-作为显式 fallback。
+- 所有文件路径先 resolve，确认仍处于 workspace；symlink escape 被拒绝。
+- `apply_patch` 是受限的 exact-context 多文件协议。它会先校验全部 hunk，随后以可恢复的
+  文件替换完成提交；失败返回结构化原因，且不留下半应用修改。
+- `run_command` 以 argv 启动，禁止 shell，限定 timeout 和 stdout/stderr 长度，并不向
+  子进程无条件继承 API key 等敏感环境变量。
+- `git_diff` 使用固定的只读 Git 命令；Agent 从不自动执行 Git commit、rebase、reset 或 push。
+- `.env*`、`config.toml`、`api_key.txt` 被本地工具禁止访问。
 
-重要限制：`run_command` **不是操作系统级 sandbox**。被启动的程序仍可能利用
-自身能力主动访问 workspace 外的路径。不要在没有额外 OS-level
-sandbox/container 和受限账户的情况下运行不可信的 repository 或命令。
+`run_command` 不是 OS 级 sandbox。即使工具入口做了限制，被启动的可信程序仍可能利用
+操作系统权限访问 workspace 外资源。因此不要在不可信仓库、高权限账户或生产机器上运行它；
+需要更强隔离时应在受限账户、container 或虚拟机中运行。
 
-## Trace 与 context
+验证不依赖另一个 LLM 猜测：运行过的 pytest、compiler 或 linter 等确定性证据保存为
+latest verification。若后续修改文件，旧的通过证据会被标记为 `stale`；最终模型文字回答
+本身不会自动得到 `VERIFIED`。重复失败和连续无进展会触发 recovery hint；达到预算则是
+`INCOMPLETE`。
 
-每次运行默认将 JSONL 事件写入 `.forge/trace.jsonl`。事件包括模型请求/响应、
-工具开始/结果、patch、plan 更新、验证、恢复和最终状态。疑似敏感字段会被
-脱敏；trace 有意保存摘要，而不是不受限制的原始模型/工具 payload。重新启动
-DBA 时会追加新事件，不会截断之前用于诊断失败的历史。
+## Context、session 与 trace
 
-`ContextManager` 在明确的字符预算下保存 persistent task context、当前 plan、
-repository map、相关代码和 recent observations。旧 observation 会在本地
-compact；不会使用托管 conversation memory。默认总上限为 80,000 字符（用字符
-数做 tokenizer-independent 的保守边界）：最近 8 条 observation 可保留原文，单条
-最多 6,000 字符；更早的结果变成本地摘要。每次 `model_request` 会显示近似 token
-占用、保留的 recent observation 和已摘要数量；出现“上下文摘要”并不等于丢失全部
-历史，`truncated` 才表示某条特别长的原始输出被截断。长时间等待 provider 时，终端会输出降频
-心跳，但心跳不会写入 JSONL，也不表示模型已经取得实际进展。
+`ContextManager` 本地管理 persistent task context、current plan、repository map、相关代码
+和 recent observations。默认总预算为 80,000 字符，使用字符数作为 tokenizer-independent
+的保守边界：近期 observation 可保留原文，过旧内容确定性压缩为摘要。每个模型请求会记录
+近似 token 使用、近期 observation 数和 compaction 情况。
+
+每次 run 默认向 workspace 写入 `.dbagent/trace.jsonl`。Trace 包含模型请求/响应、工具开始/
+结果、patch、plan、verification、recovery 与 final 等结构化事件。疑似敏感字段经过脱敏；
+trace 有意保存摘要而非无限原始 payload。`.dbagent/` 被 `.gitignore` 忽略。
 
 ## 开发与测试
 
-在已激活的虚拟环境中运行完整测试：
+完整测试不消耗 API 额度，使用 mock/scripted model client：
 
 ```powershell
 python -m pytest -q
-```
-
-其他有用检查：
-
-```powershell
-python -m pip check
 python -m compileall -q src
+python -m pip check
+git diff --check
 ```
 
-测试使用 mock model client，不需要 API key。repository 还包含用于
-AST/repository-map、patch、验证的 Python fixture，以及
-[`docs/e2e-demo.md`](<C:\AAA\DBAgent\DBAgent\docs\e2e-demo.md>) 中描述的三个
-scripted end-to-end task。
+已覆盖的关键组件包括 tool registry/dispatch、workspace sandbox、symlink、命令 timeout/
+截断/环境清理、patch atomicity、context compaction、Python AST repository map、plan transition、
+termination、verification recovery、session 与浏览器控制器。Windows 未启用创建 symlink 权限时，
+对应安全测试会明确跳过而非伪造通过。
 
-## 模块结构概览
+可用 `requirements.lock` 安装项目已验证过的依赖版本；它不是带哈希的跨平台供应链锁。
+
+## 模块结构
 
 ```text
-src/forge/
-  cli.py, config.py, trace.py       CLI、配置、可观察性
-  llm/                              Responses 与 Chat Completions adapter
-  agent/                            state、loop、plan、context、verification
-  tools/                            schema、registry、本地工具处理器
-  repository/                       scanner、AST 提取、symbol index
-  workspace.py, execution.py       路径和命令安全边界
-  patching.py                       事务式 patch 应用
-tests/                              unit、安全和端到端测试
+src/dbagent/
+  cli.py, repl.py, web_ui.py, tui.py  交互入口与展示层
+  config.py, provider_config.py       配置与本机凭据加载边界
+  llm/                                Responses / Chat Completions 适配层
+  agent/                              state、loop、plan、context、verification、control
+  tools/                              tool schema、registry、本地 handlers
+  repository/                         scanner、Python AST、symbol index、repo map
+  workspace.py, execution.py          路径与命令安全边界
+  patching.py                          原子 exact-context patch
+  trace.py, session_store.py           结构化 trace 与本地会话持久化
+tests/                                单元、安全、集成和 scripted E2E 测试
 ```
 
 ## 已知限制
 
-- CLI dashboard 保持可录制和可重定向；TUI 是交互式 ANSI dashboard，浏览器模式是
-  loopback 三栏工作台。两种界面都不会把完整源码、stdout 或模型隐藏 reasoning 直接
-  刷屏；交互终端支持安全边界上的 `/steer`、`/followup` 和 `/abort`，浏览器提供
-  `Stop`，但都不支持在单次 HTTP 请求或运行中的子进程中强制抢占。
-- 模型行为和 provider 延迟具有不确定性；即使修复本身简单，任务也可能达到
-  `INCOMPLETE`。
-- 第三方 OpenAI-compatible provider 的连接质量、响应延迟、模型语言和 function
-  calling 质量不由 Harness 控制；瞬时连接/限流/超时默认最多重试 5 次，仍失败
-  才明确报告，并且重试不消耗 Agent step。
-- `auto` 模式依赖可解释的关键词启发式，存在误分类可能；可用 `/mode ask|code`
-  明确覆盖。
-- `run_command` 没有 OS-level process/filesystem isolation；timeout 不保证整个
-  child-process tree 都被终止。
-- 返回给模型的输出会截断，但 subprocess 捕获本身不是严格的内存配额。
-- `apply_patch` 是受限的 exact-context protocol，不是完整 unified diff，也不
-  提供 file locking。
-- `/resume <ID>` 恢复的是裁剪后的对话与结构化任务状态，不会重放进程崩溃前已经完成
-  但尚未写入 session checkpoint 的单个模型推理；本轮用户请求会在 API 调用前
-  先保存，因此至少不会丢失任务文本。
-- `create_file`/`write_file` 仍是过渡编辑工具，patching 才是首选接口。
-- Python repository intelligence 是浅层 AST 分析，不能解析动态 import 或证明
-  runtime semantics。
-- Verification 识别常见 pytest/compiler/linter 命令；不熟悉的项目命令即使
-  执行成功，也可能不会更新 verification tracker。
-- 重复证据检测按工具参数和未变化文件范围做保守判断；它会避免把相同或被完整
-  覆盖的读取算作进展，但不会替代模型对证据是否充分的判断。
-- DeepSeek Chat Completions 兼容路径的 native tool calling 和 thinking 协议仍受
-  provider 行为影响，默认稳定演示应优先选择已验证的 Responses provider。
-- `requirements.lock` 固定了本项目在 Windows 上测试过的 Python 包版本；它不是
-  带哈希的跨平台供应链锁，也不替代受控环境中的镜像、Python 解释器版本和 OS 依赖。
+- 模型行为、工具调用质量和 provider 延迟具有不确定性；简单任务也可能达到 `INCOMPLETE`。
+- `run_command` 没有 OS-level process/filesystem isolation；timeout 也不保证终止完整
+  child-process tree。
+- `apply_patch` 是受限 exact-context 协议，而非完整 unified diff；也不提供 file locking。
+- `create_file` / `write_file` 是过渡编辑接口，patch 是首选。
+- Python repository intelligence 是浅层 AST 分析，不能解析动态 import 或证明 runtime semantics。
+- verification tracker 优先识别常见 pytest/compiler/linter 命令；陌生命令可执行但未必更新状态。
+- `/resume` 恢复裁剪后的对话和结构化状态，不重放中断前尚未完成的一次模型请求。
+- 浏览器 mode 不是远程 Web 服务；关闭本地进程即停止，且不应暴露 loopback URL/token。
+- 以非-editable wheel 安装时，请用 `DBAGENT_CONFIG_PATH` / `DBAGENT_DEEPSEEK_KEY_FILE` 指定
+  凭据位置，或使用环境变量；默认根目录本地配置面向本 checkout 的 editable 安装。
 
 ## License
 
-项目许可证请参阅 [`LICENSE`](<C:\AAA\DBAgent\DBAgent\LICENSE>)。
+详见 [LICENSE](LICENSE)。

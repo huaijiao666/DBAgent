@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from forge.discovery import discover_workspace, select_workspace
+from dbagent.discovery import discover_workspace, select_workspace
 
 
 def test_discovers_nearest_nested_project_root(tmp_path: Path) -> None:

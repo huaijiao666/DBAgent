@@ -5,10 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from forge.agent import AgentStatus
-from forge.agent.verification import VerificationStatus
-from forge.trace import TraceRecorder
-from forge.tui import FullscreenTUI
+from dbagent.agent import AgentStatus
+from dbagent.agent.verification import VerificationStatus
+from dbagent.trace import TraceRecorder
+from dbagent.tui import FullscreenTUI
 
 
 def test_fullscreen_tui_draws_dashboard_and_restores_terminal(tmp_path: Path) -> None:

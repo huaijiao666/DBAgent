@@ -1,6 +1,6 @@
 import pytest
 
-from forge.llm.provider_policy import (
+from dbagent.llm.provider_policy import (
     COMPATIBLE_CHAT_POLICY,
     DEEPSEEK_CHAT_POLICY,
     OPENAI_RESPONSES_POLICY,

@@ -2,15 +2,15 @@ from pathlib import Path
 
 import pytest
 
-from forge.config import ConfigurationError
-from forge.provider_config import load_repl_config
+from dbagent.config import ConfigurationError
+from dbagent.provider_config import load_repl_config
 
 
 def test_load_repl_config_reads_only_the_process_environment(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr("forge.provider_config.project_config_path", lambda: tmp_path / "missing.toml")
+    monkeypatch.setattr("dbagent.provider_config.project_config_path", lambda: tmp_path / "missing.toml")
     monkeypatch.setenv("OPENAI_API_KEY", "environment-token")
 
     config = load_repl_config()
@@ -27,7 +27,7 @@ def test_explicit_external_credential_file_reports_missing_file(tmp_path: Path) 
 def test_load_repl_config_requires_environment_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr("forge.provider_config.project_config_path", lambda: tmp_path / "missing.toml")
+    monkeypatch.setattr("dbagent.provider_config.project_config_path", lambda: tmp_path / "missing.toml")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(ConfigurationError, match="project-local config.toml"):
         load_repl_config()
@@ -49,7 +49,7 @@ experimental_bearer_token = "backup-test-token"
 """.strip(),
         encoding="utf-8",
     )
-    monkeypatch.setattr("forge.provider_config.project_config_path", lambda: path)
+    monkeypatch.setattr("dbagent.provider_config.project_config_path", lambda: path)
 
     config = load_repl_config()
 
@@ -81,7 +81,7 @@ experimental_bearer_token = "selected-token"
 """.strip(),
         encoding="utf-8",
     )
-    monkeypatch.setattr("forge.provider_config.project_config_path", lambda: local)
+    monkeypatch.setattr("dbagent.provider_config.project_config_path", lambda: local)
 
     config = load_repl_config(selected)
 

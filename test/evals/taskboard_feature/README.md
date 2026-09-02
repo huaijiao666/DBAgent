@@ -1,6 +1,6 @@
 # Taskboard fixture
 
-Taskboard is a small local task-management package used for Forge end-to-end
+Taskboard is a small local task-management package used for DBAgent end-to-end
 demos. It has separate model, repository, service, and CLI modules plus pytest
 coverage. The fixture intentionally keeps the domain small enough that a coding
 agent can inspect, edit, and verify it in a short run.

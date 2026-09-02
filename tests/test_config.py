@@ -1,10 +1,10 @@
 import pytest
 
-from forge.config import ConfigurationError, ForgeConfig
+from dbagent.config import ConfigurationError, DBAgentConfig
 
 
 def test_defaults_do_not_require_an_api_key() -> None:
-    config = ForgeConfig.from_env({})
+    config = DBAgentConfig.from_env({})
 
     assert config.openai_api_key is None
     assert config.model == "gpt-5.6-sol"
@@ -15,14 +15,14 @@ def test_defaults_do_not_require_an_api_key() -> None:
 
 
 def test_values_are_loaded_from_the_environment_mapping() -> None:
-    config = ForgeConfig.from_env(
+    config = DBAgentConfig.from_env(
         {
             "OPENAI_API_KEY": "from-environment",
-            "FORGE_BASE_URL": "https://provider.example/v1",
-            "FORGE_API_MODE": "CHAT_COMPLETIONS",
-            "FORGE_PROVIDER": "configured",
-            "FORGE_MODEL": "custom-model",
-            "FORGE_REASONING_EFFORT": "HIGH",
+            "DBAGENT_BASE_URL": "https://provider.example/v1",
+            "DBAGENT_API_MODE": "CHAT_COMPLETIONS",
+            "DBAGENT_PROVIDER": "configured",
+            "DBAGENT_MODEL": "custom-model",
+            "DBAGENT_REASONING_EFFORT": "HIGH",
         }
     )
 
@@ -36,25 +36,25 @@ def test_values_are_loaded_from_the_environment_mapping() -> None:
 
 
 def test_empty_model_is_rejected() -> None:
-    with pytest.raises(ConfigurationError, match="FORGE_MODEL must not be empty"):
-        ForgeConfig.from_env({"FORGE_MODEL": "  "})
+    with pytest.raises(ConfigurationError, match="DBAGENT_MODEL must not be empty"):
+        DBAgentConfig.from_env({"DBAGENT_MODEL": "  "})
 
 
 def test_unknown_reasoning_effort_is_rejected() -> None:
-    with pytest.raises(ConfigurationError, match="FORGE_REASONING_EFFORT"):
-        ForgeConfig.from_env({"FORGE_REASONING_EFFORT": "extreme"})
+    with pytest.raises(ConfigurationError, match="DBAGENT_REASONING_EFFORT"):
+        DBAgentConfig.from_env({"DBAGENT_REASONING_EFFORT": "extreme"})
 
 
 def test_invalid_base_url_is_rejected() -> None:
-    with pytest.raises(ConfigurationError, match="FORGE_BASE_URL"):
-        ForgeConfig.from_env({"FORGE_BASE_URL": "provider.example/v1"})
+    with pytest.raises(ConfigurationError, match="DBAGENT_BASE_URL"):
+        DBAgentConfig.from_env({"DBAGENT_BASE_URL": "provider.example/v1"})
 
 
 def test_unknown_api_mode_is_rejected() -> None:
-    with pytest.raises(ConfigurationError, match="FORGE_API_MODE"):
-        ForgeConfig.from_env({"FORGE_API_MODE": "legacy"})
+    with pytest.raises(ConfigurationError, match="DBAGENT_API_MODE"):
+        DBAgentConfig.from_env({"DBAGENT_API_MODE": "legacy"})
 
 
 def test_deepseek_provider_requires_chat_completions() -> None:
-    with pytest.raises(ConfigurationError, match="requires FORGE_API_MODE"):
-        ForgeConfig.from_env({"FORGE_PROVIDER": "deepseek"})
+    with pytest.raises(ConfigurationError, match="requires DBAGENT_API_MODE"):
+        DBAgentConfig.from_env({"DBAGENT_PROVIDER": "deepseek"})

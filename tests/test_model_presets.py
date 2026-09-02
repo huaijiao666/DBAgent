@@ -1,8 +1,8 @@
 import pytest
 from pathlib import Path
 
-from forge.config import ConfigurationError, ForgeConfig
-from forge.model_presets import (
+from dbagent.config import ConfigurationError, DBAgentConfig
+from dbagent.model_presets import (
     DEEPSEEK_BASE_URL,
     default_deepseek_key_file,
     load_deepseek_api_key,
@@ -11,8 +11,8 @@ from forge.model_presets import (
 )
 
 
-def _configured() -> ForgeConfig:
-    return ForgeConfig(
+def _configured() -> DBAgentConfig:
+    return DBAgentConfig(
         openai_api_key="configured-provider-secret",
         model="gpt-5.6-luna",
         reasoning_effort="high",
@@ -24,7 +24,7 @@ def _configured() -> ForgeConfig:
 def test_deepseek_preset_reads_environment_key_only_for_selected_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("FORGE_DEEPSEEK_API_KEY", "deepseek-test-secret")
+    monkeypatch.setenv("DBAGENT_DEEPSEEK_API_KEY", "deepseek-test-secret")
     configured = _configured()
 
     result = resolve_model_selection(
@@ -45,7 +45,7 @@ def test_deepseek_preset_reads_environment_key_only_for_selected_model(
 def test_configured_preset_restores_startup_provider_after_deepseek_switch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("FORGE_DEEPSEEK_API_KEY", "deepseek-test-secret")
+    monkeypatch.setenv("DBAGENT_DEEPSEEK_API_KEY", "deepseek-test-secret")
     configured = _configured()
     deepseek = resolve_model_selection(
         "deepseek-pro",
@@ -68,13 +68,13 @@ def test_configured_preset_restores_startup_provider_after_deepseek_switch(
 def test_deepseek_selection_requires_environment_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("FORGE_DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("DBAGENT_DEEPSEEK_API_KEY", raising=False)
     monkeypatch.setattr(
-        "forge.model_presets.default_deepseek_key_file",
+        "dbagent.model_presets.default_deepseek_key_file",
         lambda: Path("missing-deepseek-key.txt"),
     )
 
-    with pytest.raises(ConfigurationError, match="FORGE_DEEPSEEK_API_KEY"):
+    with pytest.raises(ConfigurationError, match="DBAGENT_DEEPSEEK_API_KEY"):
         resolve_model_selection(
             "deepseek-flash",
             active_config=_configured(),
@@ -87,8 +87,8 @@ def test_deepseek_key_file_is_used_when_no_environment_override(
 ) -> None:
     path = tmp_path / "deepseek-key.txt"
     path.write_text("local-deepseek-key\n", encoding="utf-8")
-    monkeypatch.delenv("FORGE_DEEPSEEK_API_KEY", raising=False)
-    monkeypatch.setattr("forge.model_presets.default_deepseek_key_file", lambda: path)
+    monkeypatch.delenv("DBAGENT_DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr("dbagent.model_presets.default_deepseek_key_file", lambda: path)
 
     assert load_deepseek_api_key() == "local-deepseek-key"
 
@@ -96,9 +96,9 @@ def test_deepseek_key_file_is_used_when_no_environment_override(
 def test_default_deepseek_key_file_is_the_repository_local_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.delenv("FORGE_DEEPSEEK_KEY_FILE", raising=False)
+    monkeypatch.delenv("DBAGENT_DEEPSEEK_KEY_FILE", raising=False)
     monkeypatch.setattr(
-        "forge.model_presets.project_deepseek_key_path",
+        "dbagent.model_presets.project_deepseek_key_path",
         lambda: tmp_path / "api_key.txt",
     )
 

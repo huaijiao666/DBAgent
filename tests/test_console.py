@@ -1,8 +1,8 @@
 import io
 
-from forge.console import safe_print
-from forge.trace import TraceRecorder
-from forge.ui import TerminalUI
+from dbagent.console import safe_print
+from dbagent.trace import TraceRecorder
+from dbagent.ui import TerminalUI
 
 
 def _ascii_stream() -> tuple[io.BytesIO, io.TextIOWrapper]:

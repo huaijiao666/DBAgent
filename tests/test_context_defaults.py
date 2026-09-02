@@ -1,4 +1,4 @@
-from forge.agent import ContextBudget
+from dbagent.agent import ContextBudget
 
 
 def test_default_context_budget_preserves_more_recent_working_history() -> None:

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from forge.agent.delivery import DeliveryRequirements
+from dbagent.agent.delivery import DeliveryRequirements
 
 
 def test_delivery_requirements_keep_explicit_relative_files_in_task_order(
@@ -26,7 +26,7 @@ def test_delivery_requirements_keep_explicit_relative_files_in_task_order(
 
 def test_delivery_requirements_ignore_workspace_escape_and_internal_paths() -> None:
     requirements = DeliveryRequirements.from_task(
-        "Do not create ../secret.py or .forge/trace.jsonl; create app.py instead."
+        "Do not create ../secret.py or .dbagent/trace.jsonl; create app.py instead."
     )
 
     assert requirements.paths == ("app.py",)

@@ -2,9 +2,9 @@ import json
 import shutil
 from pathlib import Path
 
-from forge.agent import AgentLoop, AgentStatus
-from forge.llm import FunctionCall, ModelResponse
-from forge.tools import create_coding_registry
+from dbagent.agent import AgentLoop, AgentStatus
+from dbagent.llm import FunctionCall, ModelResponse
+from dbagent.tools import create_coding_registry
 
 
 class ScriptedModelClient:

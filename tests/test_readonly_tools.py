@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from forge.llm import FunctionCall
-from forge.tools import create_readonly_registry
+from dbagent.llm import FunctionCall
+from dbagent.tools import create_readonly_registry
 
 
 def _dispatch(registry, name: str, arguments: dict[str, str]):
@@ -101,7 +101,7 @@ def test_read_file_returns_a_clear_result_for_an_empty_file(tmp_path: Path) -> N
 
 def test_list_and_search_ignore_agent_trace_directory(tmp_path: Path) -> None:
     (tmp_path / "source.py").write_text("needle = 1\n", encoding="utf-8")
-    trace_directory = tmp_path / ".forge"
+    trace_directory = tmp_path / ".dbagent"
     trace_directory.mkdir()
     (trace_directory / "trace.jsonl").write_text(
         '{"model_output":"needle secret"}\n',
@@ -117,15 +117,15 @@ def test_list_and_search_ignore_agent_trace_directory(tmp_path: Path) -> None:
     )
 
     assert listed.success is True
-    assert ".forge" not in listed.content
+    assert ".dbagent" not in listed.content
     assert searched.success is True
     assert "source.py:1" in searched.content
-    assert ".forge" not in searched.content
+    assert ".dbagent" not in searched.content
 
     direct = _dispatch(
         registry,
         "read_file",
-        {"path": ".forge/trace.jsonl"},
+        {"path": ".dbagent/trace.jsonl"},
     )
     assert direct.success is False
     assert "metadata/cache directories is blocked" in direct.content

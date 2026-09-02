@@ -2,17 +2,17 @@ import json
 import shutil
 from pathlib import Path
 
-from forge.llm import FunctionCall
-from forge.repository import (
+from dbagent.llm import FunctionCall
+from dbagent.repository import (
     RelationKind,
     RepositoryIndex,
     RepositoryScanner,
     SymbolKind,
     extract_python_module,
 )
-from forge.repository.index import MAX_REPO_MAP_CHARACTERS
-from forge.tools import create_readonly_registry
-from forge.workspace import Workspace
+from dbagent.repository.index import MAX_REPO_MAP_CHARACTERS
+from dbagent.tools import create_readonly_registry
+from dbagent.workspace import Workspace
 
 
 def _copy_fixture(tmp_path: Path) -> Path:

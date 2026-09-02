@@ -4,12 +4,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from forge.agent import AgentStatus, ContextBudget, PlanStep, PlanStepStatus, TaskPlan
-from forge.agent.verification import VerificationStatus
-from forge.config import ForgeConfig
-from forge.llm import ModelCommunicationError
-from forge.repl import ForgeRepl, _apply_config_overrides, _default_context_budget
-from forge.tools import ToolObservation
+from dbagent.agent import AgentStatus, ContextBudget, PlanStep, PlanStepStatus, TaskPlan
+from dbagent.agent.verification import VerificationStatus
+from dbagent.config import DBAgentConfig
+from dbagent.llm import ModelCommunicationError
+from dbagent.repl import DBAgentRepl, _apply_config_overrides, _default_context_budget
+from dbagent.tools import ToolObservation
 
 
 class _FakeLoop:
@@ -72,7 +72,7 @@ class _FakeLoop:
 
 def test_deepseek_repl_profile_reserves_context_for_tool_schema() -> None:
     budget = _default_context_budget(
-        ForgeConfig(
+        DBAgentConfig(
             openai_api_key="fake-token",
             model="deepseek-v4-flash",
             reasoning_effort="high",
@@ -88,7 +88,7 @@ def test_deepseek_repl_profile_reserves_context_for_tool_schema() -> None:
 
 
 def test_default_repl_profile_preserves_existing_large_context() -> None:
-    budget = _default_context_budget(ForgeConfig(openai_api_key="fake-token"))
+    budget = _default_context_budget(DBAgentConfig(openai_api_key="fake-token"))
 
     assert budget.max_context_characters == 80_000
     assert budget.max_task_characters == 30_000
@@ -96,21 +96,21 @@ def test_default_repl_profile_preserves_existing_large_context() -> None:
 
 def test_repl_rejects_unknown_ui_mode(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="ui_mode"):
-        ForgeRepl(workspace=tmp_path, ui_mode="web")
+        DBAgentRepl(workspace=tmp_path, ui_mode="web")
 
 
 def test_model_switch_uses_the_deepseek_context_profile(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setenv("FORGE_DEEPSEEK_API_KEY", "test-key")
-    config = ForgeConfig(openai_api_key="configured-key")
-    monkeypatch.setattr("forge.repl.load_repl_config", lambda _path: config)
-    monkeypatch.setattr("forge.repl.AgentLoop", _FakeLoop)
+    monkeypatch.setenv("DBAGENT_DEEPSEEK_API_KEY", "test-key")
+    config = DBAgentConfig(openai_api_key="configured-key")
+    monkeypatch.setattr("dbagent.repl.load_repl_config", lambda _path: config)
+    monkeypatch.setattr("dbagent.repl.AgentLoop", _FakeLoop)
     _FakeLoop.calls = []
     _FakeLoop.initial_plans = []
     _FakeLoop.budgets = []
     inputs = iter(["/model deepseek-flash", "inspect files", "/exit"])
-    repl = ForgeRepl(
+    repl = DBAgentRepl(
         workspace=tmp_path,
         input_function=lambda _prompt: next(inputs),
         stream=io.StringIO(),
@@ -141,25 +141,25 @@ def test_repl_keeps_local_history_and_handles_commands(
         stream.write(prompt)
         return next(inputs)
 
-    config = ForgeConfig(
+    config = DBAgentConfig(
         openai_api_key="fake-token",
         model="gpt-5.6-luna",
         reasoning_effort="max",
         base_url="https://provider.example/v1",
         api_mode="chat_completions",
     )
-    created_configs: list[ForgeConfig] = []
+    created_configs: list[DBAgentConfig] = []
 
-    def model_factory(value: ForgeConfig):
+    def model_factory(value: DBAgentConfig):
         created_configs.append(value)
         return object()
 
     _FakeLoop.calls = []
     _FakeLoop.initial_plans = []
-    monkeypatch.setattr("forge.repl.load_repl_config", lambda _path: config)
-    monkeypatch.setattr("forge.repl.AgentLoop", _FakeLoop)
+    monkeypatch.setattr("dbagent.repl.load_repl_config", lambda _path: config)
+    monkeypatch.setattr("dbagent.repl.AgentLoop", _FakeLoop)
 
-    repl = ForgeRepl(
+    repl = DBAgentRepl(
         workspace=tmp_path,
         max_steps=4,
         input_function=input_function,
@@ -193,13 +193,13 @@ def test_repl_resumes_only_an_explicit_unfinished_continuation(
 ) -> None:
     stream = io.StringIO()
     inputs = iter(["implement the feature", "continue this task", "/exit"])
-    config = ForgeConfig(openai_api_key="fake-token")
-    monkeypatch.setattr("forge.repl.load_repl_config", lambda _path: config)
-    monkeypatch.setattr("forge.repl.AgentLoop", _FakeLoop)
+    config = DBAgentConfig(openai_api_key="fake-token")
+    monkeypatch.setattr("dbagent.repl.load_repl_config", lambda _path: config)
+    monkeypatch.setattr("dbagent.repl.AgentLoop", _FakeLoop)
     _FakeLoop.calls = []
     _FakeLoop.initial_plans = []
 
-    repl = ForgeRepl(
+    repl = DBAgentRepl(
         workspace=tmp_path,
         mode="code",
         input_function=lambda _prompt: next(inputs),
@@ -217,13 +217,13 @@ def test_repl_resumes_only_an_explicit_unfinished_continuation(
 def test_repl_auto_mode_continuation_restores_code_authority(
     tmp_path: Path, monkeypatch
 ) -> None:
-    config = ForgeConfig(openai_api_key="fake-token")
-    monkeypatch.setattr("forge.repl.load_repl_config", lambda _path: config)
-    monkeypatch.setattr("forge.repl.AgentLoop", _FakeLoop)
+    config = DBAgentConfig(openai_api_key="fake-token")
+    monkeypatch.setattr("dbagent.repl.load_repl_config", lambda _path: config)
+    monkeypatch.setattr("dbagent.repl.AgentLoop", _FakeLoop)
     _FakeLoop.calls = []
     _FakeLoop.initial_plans = []
     inputs = iter(["implement a feature", "continue this task", "/exit"])
-    repl = ForgeRepl(
+    repl = DBAgentRepl(
         workspace=tmp_path,
         input_function=lambda _prompt: next(inputs),
         stream=io.StringIO(),
@@ -239,13 +239,13 @@ def test_repl_auto_mode_continuation_restores_code_authority(
 def test_repl_resume_restores_latest_workspace_session_across_processes(
     tmp_path: Path, monkeypatch
 ) -> None:
-    config = ForgeConfig(openai_api_key="fake-token")
-    monkeypatch.setattr("forge.repl.load_repl_config", lambda _path: config)
-    monkeypatch.setattr("forge.repl.AgentLoop", _FakeLoop)
+    config = DBAgentConfig(openai_api_key="fake-token")
+    monkeypatch.setattr("dbagent.repl.load_repl_config", lambda _path: config)
+    monkeypatch.setattr("dbagent.repl.AgentLoop", _FakeLoop)
     _FakeLoop.calls = []
     _FakeLoop.initial_plans = []
 
-    first = ForgeRepl(
+    first = DBAgentRepl(
         workspace=tmp_path,
         mode="code",
         input_function=lambda _prompt, values=iter(["start task", "/exit"]): next(values),
@@ -258,7 +258,7 @@ def test_repl_resume_restores_latest_workspace_session_across_processes(
     assert len(saved) == 1
 
     output = io.StringIO()
-    second = ForgeRepl(
+    second = DBAgentRepl(
         workspace=tmp_path,
         mode="code",
         input_function=lambda _prompt, values=iter(
@@ -285,12 +285,12 @@ def test_repl_help_and_unknown_command_do_not_call_model(
         stream.write(prompt)
         return next(inputs)
 
-    config = ForgeConfig(openai_api_key="fake-token")
-    monkeypatch.setattr("forge.repl.load_repl_config", lambda _path: config)
-    monkeypatch.setattr("forge.repl.AgentLoop", _FakeLoop)
+    config = DBAgentConfig(openai_api_key="fake-token")
+    monkeypatch.setattr("dbagent.repl.load_repl_config", lambda _path: config)
+    monkeypatch.setattr("dbagent.repl.AgentLoop", _FakeLoop)
     _FakeLoop.calls = []
 
-    repl = ForgeRepl(
+    repl = DBAgentRepl(
         workspace=tmp_path,
         input_function=input_function,
         stream=stream,
@@ -312,14 +312,14 @@ def test_repl_help_and_unknown_command_do_not_call_model(
 def test_repl_steps_and_continue_start_a_fresh_bounded_run(
     tmp_path: Path, monkeypatch
 ) -> None:
-    config = ForgeConfig(openai_api_key="fake-token")
-    monkeypatch.setattr("forge.repl.load_repl_config", lambda _path: config)
-    monkeypatch.setattr("forge.repl.AgentLoop", _FakeLoop)
+    config = DBAgentConfig(openai_api_key="fake-token")
+    monkeypatch.setattr("dbagent.repl.load_repl_config", lambda _path: config)
+    monkeypatch.setattr("dbagent.repl.AgentLoop", _FakeLoop)
     _FakeLoop.calls = []
     _FakeLoop.initial_plans = []
     output = io.StringIO()
     inputs = iter(["build a project", "/steps 7", "/continue 9", "/exit"])
-    repl = ForgeRepl(
+    repl = DBAgentRepl(
         workspace=tmp_path,
         mode="code",
         input_function=lambda _prompt: next(inputs),
@@ -341,13 +341,13 @@ def test_repl_steps_and_continue_start_a_fresh_bounded_run(
 def test_repl_lists_and_resumes_a_specific_session(
     tmp_path: Path, monkeypatch
 ) -> None:
-    config = ForgeConfig(openai_api_key="fake-token")
-    monkeypatch.setattr("forge.repl.load_repl_config", lambda _path: config)
-    monkeypatch.setattr("forge.repl.AgentLoop", _FakeLoop)
+    config = DBAgentConfig(openai_api_key="fake-token")
+    monkeypatch.setattr("dbagent.repl.load_repl_config", lambda _path: config)
+    monkeypatch.setattr("dbagent.repl.AgentLoop", _FakeLoop)
     _FakeLoop.calls = []
     _FakeLoop.initial_plans = []
 
-    first = ForgeRepl(
+    first = DBAgentRepl(
         workspace=tmp_path,
         mode="code",
         input_function=lambda _prompt, values=iter(["first task", "/exit"]): next(values),
@@ -358,7 +358,7 @@ def test_repl_lists_and_resumes_a_specific_session(
     assert first.run() == 0
     first_id = first._session_id
 
-    second = ForgeRepl(
+    second = DBAgentRepl(
         workspace=tmp_path,
         mode="code",
         input_function=lambda _prompt, values=iter(["second task", "/exit"]): next(values),
@@ -370,7 +370,7 @@ def test_repl_lists_and_resumes_a_specific_session(
     assert second._session_id != first_id
 
     output = io.StringIO()
-    third = ForgeRepl(
+    third = DBAgentRepl(
         workspace=tmp_path,
         mode="code",
         input_function=lambda _prompt, values=iter(
@@ -395,14 +395,14 @@ def test_repl_mode_command_is_sticky_and_visible(
 ) -> None:
     stream = io.StringIO()
     inputs = iter(["/mode ask", "/mode", "/exit"])
-    config = ForgeConfig(openai_api_key="fake-token")
-    monkeypatch.setattr("forge.repl.load_repl_config", lambda _path: config)
+    config = DBAgentConfig(openai_api_key="fake-token")
+    monkeypatch.setattr("dbagent.repl.load_repl_config", lambda _path: config)
 
     def input_function(prompt: str) -> str:
         stream.write(prompt)
         return next(inputs)
 
-    repl = ForgeRepl(
+    repl = DBAgentRepl(
         workspace=tmp_path,
         input_function=input_function,
         stream=stream,
@@ -422,12 +422,12 @@ def test_repl_rejects_invalid_pipeline_unicode_without_calling_model(
 ) -> None:
     stream = io.StringIO()
     inputs = iter(["\udcaf", "/exit"])
-    config = ForgeConfig(openai_api_key="fake-token")
-    monkeypatch.setattr("forge.repl.load_repl_config", lambda _path: config)
-    monkeypatch.setattr("forge.repl.AgentLoop", _FakeLoop)
+    config = DBAgentConfig(openai_api_key="fake-token")
+    monkeypatch.setattr("dbagent.repl.load_repl_config", lambda _path: config)
+    monkeypatch.setattr("dbagent.repl.AgentLoop", _FakeLoop)
     _FakeLoop.calls = []
 
-    repl = ForgeRepl(
+    repl = DBAgentRepl(
         workspace=tmp_path,
         input_function=lambda _prompt: next(inputs),
         stream=stream,
@@ -446,18 +446,18 @@ def test_repl_applies_explicit_model_and_reasoning_overrides(
 ) -> None:
     stream = io.StringIO()
     inputs = iter(["/exit"])
-    config = ForgeConfig(
+    config = DBAgentConfig(
         openai_api_key="fake-token",
         model="gpt-5.6-luna",
         reasoning_effort="xhigh",
         base_url="https://provider.example/v1",
         api_mode="chat_completions",
     )
-    created_configs: list[ForgeConfig] = []
+    created_configs: list[DBAgentConfig] = []
 
-    monkeypatch.setattr("forge.repl.load_repl_config", lambda _path: config)
+    monkeypatch.setattr("dbagent.repl.load_repl_config", lambda _path: config)
 
-    repl = ForgeRepl(
+    repl = DBAgentRepl(
         workspace=tmp_path,
         model_override="gpt-5.6-sol",
         reasoning_effort_override="medium",
@@ -476,8 +476,8 @@ def test_repl_applies_explicit_model_and_reasoning_overrides(
 def test_startup_deepseek_preset_switches_the_full_provider_configuration(
     monkeypatch,
 ) -> None:
-    monkeypatch.setenv("FORGE_DEEPSEEK_API_KEY", "deepseek-test-secret")
-    configured = ForgeConfig(
+    monkeypatch.setenv("DBAGENT_DEEPSEEK_API_KEY", "deepseek-test-secret")
+    configured = DBAgentConfig(
         openai_api_key="configured-provider-secret",
         model="gpt-5.6-luna",
         reasoning_effort="medium",
@@ -502,17 +502,17 @@ def test_startup_deepseek_preset_switches_the_full_provider_configuration(
 def test_repl_switches_presets_and_reasoning_without_persisting_a_key(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setenv("FORGE_DEEPSEEK_API_KEY", "deepseek-test-secret")
+    monkeypatch.setenv("DBAGENT_DEEPSEEK_API_KEY", "deepseek-test-secret")
     stream = io.StringIO()
-    config = ForgeConfig(
+    config = DBAgentConfig(
         openai_api_key="configured-provider-secret",
         model="gpt-5.6-luna",
         reasoning_effort="medium",
         base_url="https://provider.example/v1",
         api_mode="chat_completions",
     )
-    created: list[ForgeConfig] = []
-    monkeypatch.setattr("forge.repl.load_repl_config", lambda _path: config)
+    created: list[DBAgentConfig] = []
+    monkeypatch.setattr("dbagent.repl.load_repl_config", lambda _path: config)
     inputs = iter(
         [
             "/models",
@@ -523,7 +523,7 @@ def test_repl_switches_presets_and_reasoning_without_persisting_a_key(
             "/exit",
         ]
     )
-    repl = ForgeRepl(
+    repl = DBAgentRepl(
         workspace=tmp_path,
         input_function=lambda _prompt: next(inputs),
         stream=stream,
@@ -583,11 +583,11 @@ def test_repl_persists_completed_steps_when_a_model_request_fails(
             )
             raise ModelCommunicationError("provider stopped")
 
-    config = ForgeConfig(openai_api_key="fake-token")
-    monkeypatch.setattr("forge.repl.load_repl_config", lambda _path: config)
-    monkeypatch.setattr("forge.repl.AgentLoop", CheckpointThenFail)
+    config = DBAgentConfig(openai_api_key="fake-token")
+    monkeypatch.setattr("dbagent.repl.load_repl_config", lambda _path: config)
+    monkeypatch.setattr("dbagent.repl.AgentLoop", CheckpointThenFail)
     inputs = iter(["implement the feature", "/exit"])
-    repl = ForgeRepl(
+    repl = DBAgentRepl(
         workspace=tmp_path,
         mode="code",
         input_function=lambda _prompt: next(inputs),

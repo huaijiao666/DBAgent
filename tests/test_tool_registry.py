@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from forge.llm import FunctionCall, FunctionTool
-from forge.tools import ToolDefinition, ToolRegistry
+from dbagent.llm import FunctionCall, FunctionTool
+from dbagent.tools import ToolDefinition, ToolRegistry
 
 
 def _definition(name: str, handler) -> ToolDefinition:

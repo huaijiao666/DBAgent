@@ -1,4 +1,4 @@
-# Forge development instructions
+# DBAgent development instructions
 
 These instructions apply to the entire repository.
 
@@ -33,7 +33,7 @@ Build a local, repository-aware, self-verifying Coding Agent Harness from first 
 - Read `OPENAI_API_KEY` only from the process environment.
 - Never place a real API key in source code, tests, Git history, documentation, logs, fixtures, or example configuration.
 - Keep local `.env` files ignored. `.env.example` may list variable names and safe defaults but must never contain credentials.
-- Keep model behavior settings explicit, including `FORGE_MODEL` and `FORGE_REASONING_EFFORT`.
+- Keep model behavior settings explicit, including `DBAGENT_MODEL` and `DBAGENT_REASONING_EFFORT`.
 
 ## Architecture principles
 

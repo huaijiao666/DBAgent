@@ -3,14 +3,14 @@ from pathlib import Path
 
 import pytest
 
-from forge.agent import AgentLoop, AgentRunControl, AgentStatus, ContextBudget
-from forge.agent.loop import (
+from dbagent.agent import AgentLoop, AgentRunControl, AgentStatus, ContextBudget
+from dbagent.agent.loop import (
     _display_progress_text,
     _is_safe_parallel_create_batch,
     _is_safe_parallel_read_batch,
     _safe_command,
 )
-from forge.llm import (
+from dbagent.llm import (
     FunctionCall,
     FunctionTool,
     ModelConnectionError,
@@ -19,7 +19,7 @@ from forge.llm import (
     ModelTextualToolMarkupError,
     ModelResponse,
 )
-from forge.tools import ToolDefinition, ToolRegistry, ToolResult, create_coding_registry
+from dbagent.tools import ToolDefinition, ToolRegistry, ToolResult, create_coding_registry
 
 
 class QueueModelClient:

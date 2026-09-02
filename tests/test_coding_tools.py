@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from forge.llm import FunctionCall
-from forge.tools import create_coding_registry
+from dbagent.llm import FunctionCall
+from dbagent.tools import create_coding_registry
 
 
 def _dispatch(registry, name: str, arguments: dict):

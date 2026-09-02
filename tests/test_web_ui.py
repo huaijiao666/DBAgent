@@ -6,9 +6,9 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-from forge.config import ForgeConfig
-from forge.agent import AgentRunControl, SessionContext
-from forge.web_ui import (
+from dbagent.config import DBAgentConfig
+from dbagent.agent import AgentRunControl, SessionContext
+from dbagent.web_ui import (
     _ASSET_DIRECTORY,
     _browser_continuation_context,
     BrowserAgentController,
@@ -20,8 +20,8 @@ from forge.web_ui import (
 @pytest.fixture
 def controller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> BrowserAgentController:
     monkeypatch.setattr(
-        "forge.web_ui.load_repl_config",
-        lambda _path: ForgeConfig(openai_api_key="synthetic-test-key"),
+        "dbagent.web_ui.load_repl_config",
+        lambda _path: DBAgentConfig(openai_api_key="synthetic-test-key"),
     )
     return BrowserAgentController(tmp_path)
 
@@ -33,8 +33,8 @@ def test_browser_controller_selects_existing_local_workspace_and_lists_tree(
     nested = tmp_path / "project"
     nested.mkdir()
     (nested / "app.py").write_text("print('ok')\n", encoding="utf-8")
-    (nested / ".forge").mkdir()
-    (nested / ".forge" / "hidden.json").write_text("{}", encoding="utf-8")
+    (nested / ".dbagent").mkdir()
+    (nested / ".dbagent" / "hidden.json").write_text("{}", encoding="utf-8")
 
     status = controller.select_workspace(str(nested))
     tree = controller.tree()
@@ -167,7 +167,7 @@ def test_browser_controller_uses_native_picker_without_browser_file_access(
 ) -> None:
     chosen = tmp_path / "chosen"
     chosen.mkdir()
-    monkeypatch.setattr("forge.web_ui._choose_local_directory", lambda _initial: str(chosen))
+    monkeypatch.setattr("dbagent.web_ui._choose_local_directory", lambda _initial: str(chosen))
 
     result = controller.choose_workspace()
 

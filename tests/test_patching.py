@@ -2,10 +2,10 @@ import os
 import subprocess
 from pathlib import Path
 
-import forge.patching
+import dbagent.patching
 import pytest
-from forge.patching import PatchApplier
-from forge.workspace import Workspace
+from dbagent.patching import PatchApplier
+from dbagent.workspace import Workspace
 
 
 def _hunk(old: list[str], new: list[str]) -> dict[str, list[str]]:
@@ -167,12 +167,12 @@ def test_commit_failure_rolls_back_already_replaced_files(
         destination_path = Path(destination)
         if (
             destination_path == second
-            and ".forge-updated-" in source_path.name
+            and ".dbagent-updated-" in source_path.name
         ):
             raise OSError("injected second-file failure")
         real_replace(source, destination)
 
-    monkeypatch.setattr(forge.patching.os, "replace", fail_second_updated_file)
+    monkeypatch.setattr(dbagent.patching.os, "replace", fail_second_updated_file)
     applier = PatchApplier(Workspace(tmp_path))
 
     result = applier.apply(
@@ -192,7 +192,7 @@ def test_commit_failure_rolls_back_already_replaced_files(
     assert "original files restored" in result["failure_reason"]
     assert first.read_text(encoding="utf-8") == "first old\n"
     assert second.read_text(encoding="utf-8") == "second old\n"
-    assert not list(tmp_path.glob("*.forge-*.tmp"))
+    assert not list(tmp_path.glob("*.dbagent-*.tmp"))
 
 
 def test_sequential_hunks_use_the_in_memory_updated_content(tmp_path: Path) -> None:

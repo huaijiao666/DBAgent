@@ -1,8 +1,8 @@
 import json
 
-from forge.agent import ContextBudget, ContextManager
-from forge.llm import FunctionCall, ModelResponse
-from forge.tools import ToolObservation
+from dbagent.agent import ContextBudget, ContextManager
+from dbagent.llm import FunctionCall, ModelResponse
+from dbagent.tools import ToolObservation
 
 
 def _call(call_id: str, name: str, arguments: dict) -> FunctionCall:

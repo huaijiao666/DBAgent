@@ -3,10 +3,10 @@ import json
 import threading
 from pathlib import Path
 
-from forge.agent import AgentLoop, AgentStatus
-from forge.llm import FunctionCall, ModelResponse
-from forge.trace import TraceRecorder
-from forge.tools import create_coding_registry
+from dbagent.agent import AgentLoop, AgentStatus
+from dbagent.llm import FunctionCall, ModelResponse
+from dbagent.trace import TraceRecorder
+from dbagent.tools import create_coding_registry
 
 
 def test_trace_is_jsonl_and_redacts_sensitive_values(tmp_path: Path) -> None:
@@ -36,7 +36,7 @@ def test_trace_is_jsonl_and_redacts_sensitive_values(tmp_path: Path) -> None:
 
 
 def test_trace_appends_across_process_restarts(tmp_path: Path) -> None:
-    path = tmp_path / ".forge" / "trace.jsonl"
+    path = tmp_path / ".dbagent" / "trace.jsonl"
 
     with TraceRecorder(path, workspace=tmp_path) as first:
         first.record("run_started", step=0, payload={"run": 1})

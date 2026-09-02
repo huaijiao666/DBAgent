@@ -13,6 +13,7 @@ config.local.toml
 *.p12
 *.pfx
 secrets/
+private-notes/
 
 # Virtual environments
 .venv/
@@ -26,6 +27,8 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.dbagent/
+# Retain pre-rename local sessions without treating them as source files.
 .forge/
 
 # Test and coverage output

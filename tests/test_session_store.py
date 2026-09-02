@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from forge.session_store import SessionStore
+from dbagent.session_store import SessionStore
 
 
 def test_session_store_is_atomic_bounded_and_redacts_secrets(tmp_path: Path) -> None:
@@ -30,7 +30,7 @@ def test_session_store_is_atomic_bounded_and_redacts_secrets(tmp_path: Path) -> 
 
 def test_session_store_clear_removes_only_the_saved_session(tmp_path: Path) -> None:
     store = SessionStore(tmp_path)
-    unrelated = tmp_path / ".forge" / "trace.jsonl"
+    unrelated = tmp_path / ".dbagent" / "trace.jsonl"
     unrelated.parent.mkdir(parents=True)
     unrelated.write_text("trace\n", encoding="utf-8")
     store.save({"conversation": [], "session_context": {}})

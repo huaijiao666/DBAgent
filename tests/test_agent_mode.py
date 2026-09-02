@@ -1,15 +1,15 @@
 import json
 from pathlib import Path
 
-from forge.agent import (
+from dbagent.agent import (
     AgentLoop,
     AgentStatus,
     TaskMode,
     resolve_task_mode,
 )
-from forge.agent.mode import instructions_for_mode
-from forge.llm import FunctionCall, FunctionTool, ModelResponse
-from forge.tools import ToolDefinition, ToolRegistry
+from dbagent.agent.mode import instructions_for_mode
+from dbagent.llm import FunctionCall, FunctionTool, ModelResponse
+from dbagent.tools import ToolDefinition, ToolRegistry
 
 
 class ScriptedModel:

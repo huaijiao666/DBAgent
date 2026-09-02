@@ -1,14 +1,14 @@
 from types import SimpleNamespace
 
-from forge.agent import (
+from dbagent.agent import (
     PlanStep,
     PlanStepStatus,
     SessionContext,
     SessionObservation,
     TaskPlan,
 )
-from forge.agent.verification import VerificationRecord, VerificationStatus
-from forge.tools import ToolObservation
+from dbagent.agent.verification import VerificationRecord, VerificationStatus
+from dbagent.tools import ToolObservation
 
 
 def test_session_context_keeps_plan_verification_and_key_observations() -> None:

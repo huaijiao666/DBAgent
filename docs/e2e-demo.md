@@ -35,11 +35,11 @@ the temporary launcher. All three final runs ended `VERIFIED`:
 
 | task | final workspace | result | changed files | verification |
 | --- | --- | --- | --- | --- |
-| A | `.forge/e2e_runs_20260829/task_a_safe` | VERIFIED (12 steps) | `taskboard/service.py`, `tests/test_service.py` | focused and full pytest passed |
-| B | `.forge/e2e_runs_20260829/task_b_clean` | VERIFIED (14 steps) | repository, service, CLI, and their tests | focused 8 passed; full 8 passed |
-| C | `.forge/e2e_runs_20260829/task_c_clean` | VERIFIED (11 steps) | `taskboard/service.py`, `tests/test_service.py` | focused 5 passed; full 7 passed |
+| A | `.dbagent/e2e_runs_20260829/task_a_safe` | VERIFIED (12 steps) | `taskboard/service.py`, `tests/test_service.py` | focused and full pytest passed |
+| B | `.dbagent/e2e_runs_20260829/task_b_clean` | VERIFIED (14 steps) | repository, service, CLI, and their tests | focused 8 passed; full 8 passed |
+| C | `.dbagent/e2e_runs_20260829/task_c_clean` | VERIFIED (11 steps) | `taskboard/service.py`, `tests/test_service.py` | focused 5 passed; full 7 passed |
 
-The traces are JSONL files under each workspace's `.forge/trace.jsonl`; they
+The traces are JSONL files under each workspace's `.dbagent/trace.jsonl`; they
 contain no API key or bearer token. The traces also record plan updates, tool
 calls, patch results, verification status, and final status.
 
@@ -56,7 +56,7 @@ calls, patch results, verification status, and final status.
   ran `compileall` instead of pytest. The verification trace exposed the test
   failure; this was a model patch/verification mistake, not a dispatch failure.
 * Those attempts also revealed a generic safety issue: Git could discover the
-  parent Forge checkout when a workspace lacked its own `.git`. The command
+  parent DBAgent checkout when a workspace lacked its own `.git`. The command
   executor now sets `GIT_CEILING_DIRECTORIES` to the workspace parent, with a
   regression test. The fixture runs initialize their own local Git repository.
 
@@ -77,7 +77,7 @@ The priority run deliberately used a 14-turn cap. It reached the cap with a
 plan step still open and therefore reported `INCOMPLETE` even though targeted
 tests passed. This is the intended termination contract. A separate continuation
 run also exposed repeated unchanged reads, leading to more direct recovery
-guidance and exclusion of `.forge` traces from repository tools.
+guidance and exclusion of `.dbagent` traces from repository tools.
 
 ## Known limitations
 

@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "forge-coding-agent"
+name = "dbagent-coding-agent"
 version = "0.1.0"
 description = "A local, repository-aware, self-verifying coding agent harness."
 readme = "README.md"
@@ -14,11 +14,11 @@ dependencies = [
 ]
 
 [project.scripts]
-forge = "forge.cli:main"
-forge-smoke = "forge.smoke:main"
-DBA = "forge.repl:main"
-dba = "forge.repl:main"
-forge-web = "forge.web_ui:main"
+dbagent = "dbagent.cli:main"
+dbagent-smoke = "dbagent.smoke:main"
+DBA = "dbagent.repl:main"
+dba = "dbagent.repl:main"
+dbagent-web = "dbagent.web_ui:main"
 
 [project.optional-dependencies]
 dev = [
@@ -29,7 +29,7 @@ dev = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-forge = ["web_assets/*"]
+dbagent = ["web_assets/*"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"

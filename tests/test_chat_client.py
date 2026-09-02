@@ -6,8 +6,8 @@ import pytest
 import httpx2
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 
-from forge.config import ForgeConfig
-from forge.llm import (
+from dbagent.config import DBAgentConfig
+from dbagent.llm import (
     FunctionTool,
     ModelProtocolError,
     ModelRequest,
@@ -16,14 +16,14 @@ from forge.llm import (
 )
 
 
-def _config() -> ForgeConfig:
-    return ForgeConfig.from_env(
+def _config() -> DBAgentConfig:
+    return DBAgentConfig.from_env(
         {
             "OPENAI_API_KEY": "from-environment",
-            "FORGE_BASE_URL": "https://provider.example/v1",
-            "FORGE_API_MODE": "chat_completions",
-            "FORGE_MODEL": "gpt-5.6-luna",
-            "FORGE_REASONING_EFFORT": "max",
+            "DBAGENT_BASE_URL": "https://provider.example/v1",
+            "DBAGENT_API_MODE": "chat_completions",
+            "DBAGENT_MODEL": "gpt-5.6-luna",
+            "DBAGENT_REASONING_EFFORT": "max",
         }
     )
 
@@ -79,7 +79,7 @@ def test_responses_items_are_translated_to_chat_messages() -> None:
                 "type": "function_call",
                 "call_id": "call_2",
                 "name": "search_text",
-                "arguments": '{"query":"Forge"}',
+                "arguments": '{"query":"DBAgent"}',
             },
             {
                 "type": "function_call_output",
@@ -113,7 +113,7 @@ def test_responses_items_are_translated_to_chat_messages() -> None:
                     "type": "function",
                     "function": {
                         "name": "search_text",
-                        "arguments": '{"query":"Forge"}',
+                        "arguments": '{"query":"DBAgent"}',
                     },
                 },
             ],
@@ -248,7 +248,7 @@ def test_chat_request_preserves_strict_required_nullable_tool_defaults() -> None
 
 def test_chat_request_uses_provider_non_thinking_extension_for_deepseek() -> None:
     sdk = _sdk(_response(content="done"))
-    config = ForgeConfig(
+    config = DBAgentConfig(
         openai_api_key="test-key",
         model="deepseek-v4-flash",
         reasoning_effort="high",
@@ -268,7 +268,7 @@ def test_chat_request_uses_provider_non_thinking_extension_for_deepseek() -> Non
 
 def test_chat_disables_deepseek_thinking_during_executable_tool_turns() -> None:
     sdk = _sdk(_response(content="done"))
-    config = ForgeConfig(
+    config = DBAgentConfig(
         openai_api_key="test-key",
         model="deepseek-v4-flash",
         reasoning_effort="high",
@@ -293,7 +293,7 @@ def test_chat_disables_deepseek_thinking_during_executable_tool_turns() -> None:
 def test_deepseek_tool_turn_does_not_replay_or_retain_reasoning_content() -> None:
     """Thinking-disabled tool turns must not form an invalid DeepSeek history."""
 
-    config = ForgeConfig(
+    config = DBAgentConfig(
         openai_api_key="test-key",
         model="deepseek-v4-flash",
         reasoning_effort="high",
@@ -355,7 +355,7 @@ def test_deepseek_tool_turn_does_not_replay_or_retain_reasoning_content() -> Non
 
 def test_deepseek_finalization_omits_tools_and_keeps_thinking_disabled() -> None:
     sdk = _sdk(_response(content="done"))
-    config = ForgeConfig(
+    config = DBAgentConfig(
         openai_api_key="test-key",
         model="deepseek-v4-flash",
         reasoning_effort="high",
@@ -445,7 +445,7 @@ def test_chat_does_not_retain_deepseek_reasoning_content() -> None:
         )
     )
 
-    deepseek_config = ForgeConfig(
+    deepseek_config = DBAgentConfig(
         openai_api_key="test-key",
         model="deepseek-v4-flash",
         reasoning_effort="high",

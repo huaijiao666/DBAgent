@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from forge.smoke import main
+from dbagent.smoke import main
 
 
 def test_smoke_entry_sends_one_text_request(monkeypatch, capsys) -> None:
@@ -11,10 +11,10 @@ def test_smoke_entry_sends_one_text_request(monkeypatch, capsys) -> None:
         model="gpt-5.6-sol",
         response_id="resp_smoke",
         status="completed",
-        output_text="Forge smoke test successful.",
+        output_text="DBAgent smoke test successful.",
     )
 
-    with patch("forge.smoke.OpenAIResponsesClient", return_value=model_client):
+    with patch("dbagent.smoke.OpenAIResponsesClient", return_value=model_client):
         exit_code = main(["Say hello"])
 
     assert exit_code == 0
@@ -23,7 +23,7 @@ def test_smoke_entry_sends_one_text_request(monkeypatch, capsys) -> None:
     assert request.tools == ()
     output = capsys.readouterr().out
     assert "gpt-5.6-sol" in output
-    assert "Forge smoke test successful." in output
+    assert "DBAgent smoke test successful." in output
 
 
 def test_smoke_entry_fails_cleanly_without_api_key(monkeypatch, capsys) -> None:
@@ -37,7 +37,7 @@ def test_smoke_entry_fails_cleanly_without_api_key(monkeypatch, capsys) -> None:
 
 def test_smoke_uses_chat_completions_mode(monkeypatch, capsys) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "from-environment")
-    monkeypatch.setenv("FORGE_API_MODE", "chat_completions")
+    monkeypatch.setenv("DBAGENT_API_MODE", "chat_completions")
     model_client = Mock()
     model_client.create_response.return_value = SimpleNamespace(
         model="gpt-5.6-luna",
@@ -46,7 +46,7 @@ def test_smoke_uses_chat_completions_mode(monkeypatch, capsys) -> None:
         output_text="hello",
     )
 
-    with patch("forge.smoke.OpenAIChatCompletionsClient", return_value=model_client):
+    with patch("dbagent.smoke.OpenAIChatCompletionsClient", return_value=model_client):
         exit_code = main(["Say hello"])
 
     assert exit_code == 0

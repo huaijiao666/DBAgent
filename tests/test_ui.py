@@ -2,10 +2,10 @@ import io
 from pathlib import Path
 from types import SimpleNamespace
 
-from forge.agent import AgentStatus
-from forge.agent.verification import VerificationStatus
-from forge.llm.provider_policy import DEEPSEEK_CHAT_POLICY
-from forge.ui import TerminalUI
+from dbagent.agent import AgentStatus
+from dbagent.agent.verification import VerificationStatus
+from dbagent.llm.provider_policy import DEEPSEEK_CHAT_POLICY
+from dbagent.ui import TerminalUI
 
 
 def test_terminal_ui_renders_header_and_summary(tmp_path: Path) -> None:

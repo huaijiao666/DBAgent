@@ -7,7 +7,7 @@ owns state, execution, safety and completion evidence.
 User / CLI / TUI / Browser UI
               |
               v
-ForgeRepl or BrowserAgentController
+DBAgentRepl or BrowserAgentController
               |
               v
 AgentLoop ---- ContextManager ---- AgentState / TaskPlan
@@ -58,9 +58,9 @@ Every important transition becomes a redacted JSONL trace event. The same event
 can be rendered by the line CLI, ANSI TUI and loopback browser dashboard. The
 browser UI never receives provider credentials; it only talks to the local
 Python process through a random-token loopback endpoint. The interactive DBA
-launcher may load a user-authorized provider TOML or key file from a
-repository-external local location; those values remain in memory and never
-enter session files or traces.
+launcher may load a user-authorized, Git-ignored provider TOML or key file
+from the editable checkout root (or an explicit local path); those values
+remain in memory and never enter session files or traces.
 
 Runs can accept steering at safe boundaries. Session checkpoints persist the
 bounded conversation, structured plan and key observations after completed

@@ -2,20 +2,20 @@ import json
 import shutil
 from pathlib import Path
 
-from forge.agent import (
+from dbagent.agent import (
     AgentLoop,
     AgentStatus,
     VerificationStatus,
     VerificationTracker,
 )
-from forge.agent.verification import (
+from dbagent.agent.verification import (
     classify_verification_command,
     suggested_verification_commands,
     suggested_verification_commands_for_paths,
 )
-from forge.llm import FunctionCall, ModelResponse
-from forge.trace import TraceRecorder
-from forge.tools import ToolObservation, create_coding_registry
+from dbagent.llm import FunctionCall, ModelResponse
+from dbagent.trace import TraceRecorder
+from dbagent.tools import ToolObservation, create_coding_registry
 
 
 class ScriptedModelClient:

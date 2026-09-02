@@ -5,8 +5,8 @@ import httpx2
 import pytest
 from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 
-from forge.config import ForgeConfig
-from forge.llm import (
+from dbagent.config import DBAgentConfig
+from dbagent.llm import (
     FunctionTool,
     ModelAPIError,
     ModelConfigurationError,
@@ -19,20 +19,20 @@ from forge.llm import (
 )
 
 
-def _config(*, reasoning_effort: str = "medium") -> ForgeConfig:
-    return ForgeConfig.from_env(
+def _config(*, reasoning_effort: str = "medium") -> DBAgentConfig:
+    return DBAgentConfig.from_env(
         {
             "OPENAI_API_KEY": "from-environment",
-            "FORGE_REASONING_EFFORT": reasoning_effort,
+            "DBAGENT_REASONING_EFFORT": reasoning_effort,
         }
     )
 
 
-def _config_with_base_url() -> ForgeConfig:
-    return ForgeConfig.from_env(
+def _config_with_base_url() -> DBAgentConfig:
+    return DBAgentConfig.from_env(
         {
             "OPENAI_API_KEY": "from-environment",
-            "FORGE_BASE_URL": "https://provider.example/v1",
+            "DBAGENT_BASE_URL": "https://provider.example/v1",
         }
     )
 
@@ -189,7 +189,7 @@ def test_non_function_tool_values_are_rejected() -> None:
 
 def test_missing_api_key_is_rejected_before_sdk_construction() -> None:
     with pytest.raises(ModelConfigurationError, match="OPENAI_API_KEY"):
-        OpenAIResponsesClient(ForgeConfig.from_env({}))
+        OpenAIResponsesClient(DBAgentConfig.from_env({}))
 
 
 def test_custom_base_url_is_passed_to_official_client(
@@ -197,7 +197,7 @@ def test_custom_base_url_is_passed_to_official_client(
 ) -> None:
     sdk = _sdk_client()
     constructor = Mock(return_value=sdk)
-    monkeypatch.setattr("forge.llm.client.OpenAI", constructor)
+    monkeypatch.setattr("dbagent.llm.client.OpenAI", constructor)
 
     OpenAIResponsesClient(_config_with_base_url(), timeout_seconds=7, max_retries=3)
 

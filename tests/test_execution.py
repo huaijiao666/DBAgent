@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from forge.execution import CommandExecutor
-from forge.workspace import Workspace
+from dbagent.execution import CommandExecutor
+from dbagent.workspace import Workspace
 
 
 def _write_script(workspace: Path, name: str, source: str) -> None:
