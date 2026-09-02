@@ -141,6 +141,41 @@ def test_responses_request_can_disable_tools_for_finalization() -> None:
     assert sdk.responses.create.call_args.kwargs["tool_choice"] == "none"
 
 
+def test_responses_stream_forwards_text_deltas_and_normalizes_completion() -> None:
+    completed = _response(output=[{"type": "message"}])
+    sdk = _sdk_client()
+    sdk.responses.create.return_value = [
+        SimpleNamespace(type="response.output_text.delta", delta="Hello "),
+        SimpleNamespace(type="response.output_text.delta", delta="world"),
+        SimpleNamespace(type="response.completed", response=completed),
+    ]
+    client = OpenAIResponsesClient(_config(), sdk_client=sdk)
+    events: list[tuple[str, dict[str, object]]] = []
+
+    result = client.create_response_stream(
+        ModelRequest(input="hello"),
+        on_event=lambda kind, payload: events.append((kind, payload)),
+    )
+
+    assert sdk.responses.create.call_args.kwargs["stream"] is True
+    assert events == [
+        ("text_delta", {"delta": "Hello "}),
+        ("text_delta", {"delta": "world"}),
+    ]
+    assert result.response_id == "resp_test"
+
+
+def test_responses_stream_requires_a_completed_response() -> None:
+    sdk = _sdk_client()
+    sdk.responses.create.return_value = [
+        SimpleNamespace(type="response.output_text.delta", delta="partial")
+    ]
+    client = OpenAIResponsesClient(_config(), sdk_client=sdk)
+
+    with pytest.raises(ModelProtocolError, match="response.completed"):
+        client.create_response_stream(ModelRequest(input="hello"), on_event=lambda *_: None)
+
+
 def test_non_function_tool_values_are_rejected() -> None:
     sdk = _sdk_client()
     client = OpenAIResponsesClient(_config(), sdk_client=sdk)

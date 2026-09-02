@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 api_key.txt
+/config.toml
 credentials*.json
 credentials*.toml
 config.local.toml

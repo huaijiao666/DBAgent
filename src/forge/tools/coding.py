@@ -230,7 +230,13 @@ def _command_arguments(value: Any) -> list[str]:
 def _apply_patch(
     patch_applier: PatchApplier, arguments: Mapping[str, Any]
 ) -> ToolResult:
-    result = patch_applier.apply(arguments.get("files"))
+    files = arguments.get("files")
+    # Some OpenAI-compatible providers flatten a one-file schema despite the
+    # declared ``files`` wrapper.  Accept that unambiguous form locally, then
+    # pass it through the same atomic multi-file patch engine.
+    if files is None and "path" in arguments and "hunks" in arguments:
+        files = [{"path": arguments["path"], "hunks": arguments["hunks"]}]
+    result = patch_applier.apply(files)
     return ToolResult(success=bool(result["applied"]), content=result)
 
 

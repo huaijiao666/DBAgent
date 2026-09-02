@@ -21,6 +21,7 @@ from forge.tools import ToolObservation
 class AgentStatus(str, Enum):
     RUNNING = "running"
     COMPLETED = "completed"
+    UNVERIFIED = "unverified"
     MAX_STEPS = "max_steps"
     ERROR = "error"
     ABORTED = "aborted"

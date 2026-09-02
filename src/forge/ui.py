@@ -129,8 +129,9 @@ class TerminalUI:
         self._write("  /capabilities  show active provider capabilities and limitations")
         self._write("  /plan          show the latest retained task plan")
         self._write("  /sessions      list resumable sessions in this workspace")
-        self._write("  /resume <ID>   restore a specific session (/resume latest also works)")
+        self._write("  /resume <ID|#> restore by ID, prefix, or list number (/resume latest works)")
         self._write("  /continue [N]  continue the unfinished plan; optionally change its step budget")
+        self._write("  During a task: /steer or /followup <message>; /abort (interactive terminal only)")
         self._write("  /new           start a new conversation and keep saved sessions")
         self._write("  /clear         delete only the current saved conversation")
         self._write("  /help          show this help")
@@ -271,6 +272,17 @@ class TerminalUI:
                 "仍在等待模型  "
                 f"provider request running for {payload.get('waiting_seconds', '?')}s"
             )
+        elif event == "model_stream":
+            if payload.get("kind") == "text_delta":
+                # Do not add a newline per token: this is a genuine streaming
+                # progress signal, but remains readable in normal terminals.
+                detail = "模型流式输出  " + _truncate(
+                    str(payload.get("delta", "")), 96
+                )
+            else:
+                detail = "模型正在构造本地工具调用"
+        elif event == "user_steering":
+            detail = "已接收用户实时指令，将在下一安全边界生效"
         elif event == "model_error":
             action = "retrying" if payload.get("will_retry") else "stopped"
             detail = (
@@ -361,6 +373,8 @@ class TerminalUI:
                 f"完成  status={payload.get('status')}  "
                 f"verification={payload.get('verification_status', 'not_run')}"
             )
+            if payload.get("reason"):
+                detail += f"  reason={_truncate(str(payload['reason']), 56)}"
         else:
             detail = str(event)
         return f"{prefix} {self._paint(detail, tone)}"
@@ -434,8 +448,8 @@ class TerminalUI:
         if not sessions:
             self._write("  No saved sessions in this workspace.")
             return
-        self._write("  ID                       Updated              Turns  Verify     Title")
-        for item in sessions:
+        self._write("  #  ID                       Updated              Turns  Verify     Title")
+        for index, item in enumerate(sessions, start=1):
             session_id = str(getattr(item, "session_id", "?"))
             active = ">" if session_id == active_session_id else " "
             updated = _display_timestamp(str(getattr(item, "updated_at", "")))
@@ -443,7 +457,7 @@ class TerminalUI:
             status = str(getattr(item, "status", "unknown"))
             title = _truncate(str(getattr(item, "title", "Untitled")), 42)
             self._write(
-                f" {active} {session_id:<24} {updated:<19} {turns:>5}  "
+                f" {active} {index:>2} {session_id:<24} {updated:<19} {turns:>5}  "
                 f"{_truncate(status, 10):<10} {title}"
             )
 

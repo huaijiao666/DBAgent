@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from forge.llm import FunctionCall
 from forge.tools import create_readonly_registry
 
@@ -65,6 +67,26 @@ def test_read_file_can_return_a_specific_inclusive_line_range(tmp_path: Path) ->
         "2: two\n3: three\n"
         "[showing lines 2-3 of 4; use start_line=4 to continue.]"
     )
+
+
+def test_read_file_schema_uses_required_nullable_defaults_for_strict_providers(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "module.py").write_text("one\ntwo\n", encoding="utf-8")
+    registry = create_readonly_registry(tmp_path)
+    schema = next(
+        tool.parameters for tool in registry.schemas() if tool.name == "read_file"
+    )
+
+    assert schema["required"] == ["path", "start_line", "end_line"]
+    assert schema["properties"]["start_line"]["type"] == ["integer", "null"]
+    observation = _dispatch(
+        registry,
+        "read_file",
+        {"path": "module.py", "start_line": None, "end_line": None},
+    )
+    assert observation.success is True
+    assert observation.content == "1: one\n2: two"
 
 
 def test_read_file_returns_a_clear_result_for_an_empty_file(tmp_path: Path) -> None:
@@ -150,5 +172,20 @@ def test_local_environment_files_are_blocked(tmp_path: Path) -> None:
 
     assert observation.success is False
     assert observation.content == (
-        "PermissionError: access to local environment files is blocked"
+        "PermissionError: access to local credential files is blocked"
     )
+
+
+@pytest.mark.parametrize("name", ["api_key.txt", "config.toml"])
+def test_local_credential_files_are_not_listed_or_read(
+    tmp_path: Path, name: str
+) -> None:
+    (tmp_path / name).write_text("secret-value", encoding="utf-8")
+    registry = create_readonly_registry(tmp_path)
+
+    listing = _dispatch(registry, "list_files", {"path": "."})
+    reading = _dispatch(registry, "read_file", {"path": name})
+
+    assert name not in listing.content.splitlines()
+    assert reading.success is False
+    assert reading.content == "PermissionError: access to local credential files is blocked"

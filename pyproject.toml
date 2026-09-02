@@ -18,6 +18,7 @@ forge = "forge.cli:main"
 forge-smoke = "forge.smoke:main"
 DBA = "forge.repl:main"
 dba = "forge.repl:main"
+forge-web = "forge.web_ui:main"
 
 [project.optional-dependencies]
 dev = [
@@ -26,6 +27,9 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+forge = ["web_assets/*"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"

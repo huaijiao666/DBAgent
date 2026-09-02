@@ -56,6 +56,7 @@ class TraceRecorder:
         self._progress_interval_seconds = progress_interval_seconds
         self._waiting_stop = threading.Event()
         self._waiting_thread: threading.Thread | None = None
+        self._stream_text_buffers: dict[int, str] = {}
         self._started = time.monotonic()
         self._file = self._open(path)
 
@@ -68,6 +69,8 @@ class TraceRecorder:
     ) -> None:
         """Append one flushed JSONL event and render its concise console line."""
 
+        if event in {"model_response", "final"}:
+            self._flush_stream_text(step)
         if event in {"model_response", "final"} or (
             event == "model_error" and not (payload or {}).get("will_retry")
         ):
@@ -84,12 +87,16 @@ class TraceRecorder:
         self._file.write("\n")
         self._file.flush()
         if self.console:
-            line = (
-                self._renderer.render_event(item)
-                if self._renderer is not None
-                else _format_console_line(item)
-            )
-            safe_print(line, stream=self._stream, flush=True)
+            consumer = getattr(self._renderer, "consume_event", None)
+            if callable(consumer):
+                consumer(item)
+            else:
+                line = (
+                    self._renderer.render_event(item)
+                    if self._renderer is not None
+                    else _format_console_line(item)
+                )
+                safe_print(line, stream=self._stream, flush=True)
             if event == "model_request":
                 self._start_waiting(step)
 
@@ -107,6 +114,22 @@ class TraceRecorder:
         prose that could echo sensitive user input.
         """
 
+        if event == "model_stream":
+            # The first real server-sent event is stronger feedback than the
+            # periodic waiting heartbeat, so stop it immediately.
+            self._stop_waiting()
+            if (payload or {}).get("kind") == "text_delta":
+                delta = str((payload or {}).get("delta", ""))
+                buffered = self._stream_text_buffers.get(step, "") + delta
+                # Streaming one terminal line per token is noisy and can make
+                # a Windows console feel slower than the API.  Flush complete
+                # lines or bounded chunks while retaining true incremental
+                # rendering.
+                if "\n" not in buffered and len(buffered) < 96:
+                    self._stream_text_buffers[step] = buffered
+                    return
+                payload = {**(payload or {}), "delta": buffered}
+                self._stream_text_buffers.pop(step, None)
         if not self.console:
             return
         item = {
@@ -116,6 +139,34 @@ class TraceRecorder:
             "event": event,
             "payload": _sanitize(dict(payload or {})),
         }
+        consumer = getattr(self._renderer, "consume_event", None)
+        if callable(consumer):
+            consumer(item)
+            return
+        line = (
+            self._renderer.render_event(item)
+            if self._renderer is not None
+            else _format_console_line(item)
+        )
+        safe_print(line, stream=self._stream, flush=True)
+
+    def _flush_stream_text(self, step: int) -> None:
+        """Render a final partial text chunk before a completed response line."""
+
+        delta = self._stream_text_buffers.pop(step, "")
+        if not delta or not self.console:
+            return
+        item = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "elapsed_ms": round((time.monotonic() - self._started) * 1000),
+            "step": step,
+            "event": "model_stream",
+            "payload": _sanitize({"kind": "text_delta", "delta": delta}),
+        }
+        consumer = getattr(self._renderer, "consume_event", None)
+        if callable(consumer):
+            consumer(item)
+            return
         line = (
             self._renderer.render_event(item)
             if self._renderer is not None
@@ -159,6 +210,11 @@ class TraceRecorder:
                     "event": "model_wait",
                     "payload": {"waiting_seconds": waiting_seconds},
                 }
+                consumer = getattr(self._renderer, "consume_event", None)
+                if callable(consumer):
+                    consumer(item)
+                    delay = min(delay * 2, 60.0)
+                    continue
                 line = (
                     self._renderer.render_event(item)
                     if self._renderer is not None

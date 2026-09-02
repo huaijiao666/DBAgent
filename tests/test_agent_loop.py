@@ -3,8 +3,13 @@ from pathlib import Path
 
 import pytest
 
-from forge.agent import AgentLoop, AgentStatus, ContextBudget
-from forge.agent.loop import _safe_command
+from forge.agent import AgentLoop, AgentRunControl, AgentStatus, ContextBudget
+from forge.agent.loop import (
+    _display_progress_text,
+    _is_safe_parallel_create_batch,
+    _is_safe_parallel_read_batch,
+    _safe_command,
+)
 from forge.llm import (
     FunctionCall,
     FunctionTool,
@@ -14,7 +19,7 @@ from forge.llm import (
     ModelTextualToolMarkupError,
     ModelResponse,
 )
-from forge.tools import ToolDefinition, ToolRegistry, ToolResult
+from forge.tools import ToolDefinition, ToolRegistry, ToolResult, create_coding_registry
 
 
 class QueueModelClient:
@@ -107,6 +112,331 @@ def test_normal_termination_without_tool_call(tmp_path: Path) -> None:
     }
     assert len(state.context_usage) == 1
     assert state.context_usage[0].input_characters <= 48_000
+
+
+def test_continuation_context_is_not_promoted_to_the_current_task(tmp_path: Path) -> None:
+    model = QueueModelClient([_response("resp_final", text="已完成说明")])
+
+    state = AgentLoop(model, _registry()).run(
+        "说明当前项目如何运行",
+        workspace=tmp_path,
+        continuation_context="Earlier session fact: a test previously failed.",
+    )
+
+    assert state.task == "说明当前项目如何运行"
+    assert model.requests[0].input[0] == {
+        "role": "user",
+        "content": "[Persistent task context]\n说明当前项目如何运行",
+    }
+    assert "Earlier session fact" in str(model.requests[0].input[1])
+
+
+def test_runtime_plan_goal_excludes_continuation_context(tmp_path: Path) -> None:
+    model = QueueModelClient([_response("resp_final", text="暂时无法完成")])
+
+    state = AgentLoop(
+        model,
+        create_coding_registry(tmp_path),
+        mode="code",
+        max_steps=1,
+    ).run(
+        "修复当前测试失败",
+        workspace=tmp_path,
+        continuation_context="Earlier conversation: build a snake game.",
+    )
+
+    assert state.plan is not None
+    assert state.plan.goal == "修复当前测试失败"
+
+
+def test_low_signal_read_progress_is_hidden_from_the_conversation() -> None:
+    call = FunctionCall("read", "read_file", "{}")
+
+    assert _display_progress_text(
+        "I will inspect the implementation first.", (call,), chinese=True
+    ) == ""
+    assert _display_progress_text("我会先检查实现。", (call,), chinese=True) == ""
+
+
+def test_reasoned_chinese_progress_is_kept_for_the_execution_summary() -> None:
+    text = "已确认工作区为空且 Tkinter 可用，因此先建立可测试的规则层，再添加图形界面。"
+
+    assert _display_progress_text(
+        text,
+        (FunctionCall("create", "create_file", "{}"),),
+        chinese=True,
+    ) == text
+
+
+def test_common_zuo_yi_ge_build_request_gets_a_runtime_plan(tmp_path: Path) -> None:
+    model = QueueModelClient([_response("resp_final", text="尚未完成")])
+
+    state = AgentLoop(
+        model,
+        create_coding_registry(tmp_path),
+        mode="code",
+        max_steps=1,
+    ).run("做一个可运行的俄罗斯方块游戏", workspace=tmp_path)
+
+    assert state.plan is not None
+    assert state.plan.goal == "做一个可运行的俄罗斯方块游戏"
+    assert "update_plan" not in [tool.name for tool in model.requests[0].tools]
+
+
+def test_only_distinct_create_file_calls_may_share_one_local_turn() -> None:
+    create_a = FunctionCall("a", "create_file", json.dumps({"path": "a.py"}))
+    create_b = FunctionCall("b", "create_file", json.dumps({"path": "b.py"}))
+    duplicate = FunctionCall("c", "create_file", json.dumps({"path": "a.py"}))
+
+    assert _is_safe_parallel_create_batch((create_a, create_b))
+    assert not _is_safe_parallel_create_batch((create_a, duplicate))
+    assert not _is_safe_parallel_create_batch((create_a, _call("read")))
+
+
+def test_only_read_only_evidence_calls_may_share_one_local_turn() -> None:
+    read_a = FunctionCall("a", "read_file", json.dumps({"path": "a.py"}))
+    read_b = FunctionCall("b", "read_file", json.dumps({"path": "b.py"}))
+
+    assert _is_safe_parallel_read_batch((read_a, read_b))
+    assert not _is_safe_parallel_read_batch((read_a, _call("command", name="run_command")))
+    assert not _is_safe_parallel_read_batch((read_a, FunctionCall(
+        "patch", "apply_patch", json.dumps({"patches": []})
+    )))
+
+
+def test_mutation_withholds_redundant_reads_until_a_local_command_runs(
+    tmp_path: Path,
+) -> None:
+    registry = ToolRegistry(
+        [
+            ToolDefinition(
+                schema=FunctionTool("create_file", "create", {"type": "object"}),
+                handler=lambda _arguments: {"path": "game.py", "changed_files": ["game.py"]},
+            ),
+            ToolDefinition(
+                schema=FunctionTool("read_file", "read", {"type": "object"}),
+                handler=lambda _arguments: "source",
+            ),
+            ToolDefinition(
+                schema=FunctionTool("run_command", "verify", {"type": "object"}),
+                handler=lambda _arguments: {
+                    "command": ["python", "-m", "pytest"],
+                    "cwd": ".",
+                    "return_code": 0,
+                    "timed_out": False,
+                    "stdout": "1 passed",
+                    "stderr": "",
+                },
+            ),
+        ]
+    )
+    create = FunctionCall("create", "create_file", "{}")
+    verify = FunctionCall("verify", "run_command", "{}")
+    model = QueueModelClient(
+        [
+            _response("created", calls=(create,)),
+            _response("verified", calls=(verify,)),
+            _response("final", text="已验证。"),
+        ]
+    )
+
+    state = AgentLoop(model, registry, mode="code", max_steps=4).run(
+        "创建一个文件并验证", workspace=tmp_path
+    )
+
+    assert state.status is AgentStatus.COMPLETED
+    assert state.plan is not None
+    assert all(step.status.value == "completed" for step in state.plan.steps)
+    assert "read_file" not in [tool.name for tool in model.requests[1].tools]
+    assert "run_command" in [tool.name for tool in model.requests[1].tools]
+
+
+def test_provider_cannot_execute_a_tool_withheld_from_the_current_turn(
+    tmp_path: Path,
+) -> None:
+    reads = 0
+
+    def read_handler(_arguments):
+        nonlocal reads
+        reads += 1
+        return "this handler must not be reached"
+
+    registry = ToolRegistry(
+        [
+            ToolDefinition(
+                schema=FunctionTool("create_file", "create", {"type": "object"}),
+                handler=lambda _arguments: {
+                    "path": "game.py", "changed_files": ["game.py"]
+                },
+            ),
+            ToolDefinition(
+                schema=FunctionTool("read_file", "read", {"type": "object"}),
+                handler=read_handler,
+            ),
+            ToolDefinition(
+                schema=FunctionTool("run_command", "verify", {"type": "object"}),
+                handler=lambda _arguments: {
+                    "command": ["python", "-m", "pytest"],
+                    "cwd": ".",
+                    "return_code": 0,
+                    "timed_out": False,
+                    "stdout": "1 passed",
+                    "stderr": "",
+                },
+            ),
+        ]
+    )
+    model = QueueModelClient(
+        [
+            _response("create", calls=(FunctionCall("create", "create_file", "{}"),)),
+            # DeepSeek-compatible routes occasionally return a stale function
+            # name. It was not in the request tool set after the mutation.
+            _response("stale", calls=(FunctionCall("read", "read_file", "{}"),)),
+            _response("verify", calls=(FunctionCall("verify", "run_command", "{}"),)),
+            _response("final", text="Verified."),
+        ]
+    )
+
+    state = AgentLoop(model, registry, mode="code", max_steps=5).run(
+        "create a small project", workspace=tmp_path
+    )
+
+    assert state.status is AgentStatus.COMPLETED
+    assert reads == 0
+    assert state.observations[1].success is False
+    assert "not available in this turn" in state.observations[1].content
+
+
+def test_unclassified_failed_local_command_starts_a_repair_diagnosis_phase(
+    tmp_path: Path,
+) -> None:
+    registry = ToolRegistry(
+        [
+            ToolDefinition(
+                schema=FunctionTool("run_command", "run", {"type": "object"}),
+                handler=lambda _arguments: {
+                    "command": ["python", "-c", "import missing_module"],
+                    "cwd": ".",
+                    "return_code": 1,
+                    "timed_out": False,
+                    "stdout": "",
+                    "stderr": "ModuleNotFoundError: no module named missing_module",
+                },
+            ),
+            ToolDefinition(
+                schema=FunctionTool("read_file", "read", {"type": "object"}),
+                handler=lambda _arguments: "source",
+            ),
+        ]
+    )
+    model = QueueModelClient(
+        [
+            _response("run", calls=(FunctionCall("run", "run_command", "{}"),)),
+            _response("final", text="The import failure was recorded."),
+        ]
+    )
+
+    state = AgentLoop(model, registry, mode="code").run(
+        "inspect the project", workspace=tmp_path
+    )
+
+    assert state.status is AgentStatus.COMPLETED
+    second_tools = {tool.name for tool in model.requests[1].tools}
+    assert "read_file" in second_tools
+    second_input = json.dumps(model.requests[1].input, ensure_ascii=False)
+    assert "ModuleNotFoundError" in second_input
+
+
+def test_runtime_plan_does_not_verify_a_partial_explicit_file_delivery(
+    tmp_path: Path,
+) -> None:
+    def create_main(_arguments):
+        (tmp_path / "main.py").write_text("print('ok')\n", encoding="utf-8")
+        return {"path": "main.py", "changed_files": ["main.py"]}
+
+    registry = ToolRegistry(
+        [
+            ToolDefinition(
+                schema=FunctionTool("create_file", "create", {"type": "object"}),
+                handler=create_main,
+            ),
+            ToolDefinition(
+                schema=FunctionTool("run_command", "verify", {"type": "object"}),
+                handler=lambda _arguments: {
+                    "command": ["python", "-m", "py_compile", "main.py"],
+                    "cwd": ".",
+                    "return_code": 0,
+                    "timed_out": False,
+                    "stdout": "",
+                    "stderr": "",
+                },
+            ),
+        ]
+    )
+    model = QueueModelClient(
+        [
+            _response("create", calls=(FunctionCall("create", "create_file", "{}"),)),
+            _response("verify", calls=(FunctionCall("verify", "run_command", "{}"),)),
+        ]
+    )
+
+    state = AgentLoop(model, registry, mode="code", max_steps=2).run(
+        "Create main.py and README.md, then verify the project.", workspace=tmp_path
+    )
+
+    assert state.status is AgentStatus.MAX_STEPS
+    assert state.plan is not None
+    assert {step.step_id: step.status.value for step in state.plan.steps} == {
+        "inspect": "completed",
+        "implement": "in_progress",
+        "verify": "in_progress",
+        "deliver": "pending",
+    }
+
+
+def test_live_steering_is_added_to_the_next_local_context(tmp_path: Path) -> None:
+    control = AgentRunControl()
+
+    def steer_after_first_tool(arguments):
+        assert arguments["value"] == "inspect"
+        assert control.submit_steering("also add a README")
+        return "inspected"
+
+    model = QueueModelClient(
+        [
+            _response("tool", calls=(_call("call_1", value="inspect"),)),
+            _response("final", text="Done."),
+        ]
+    )
+    state = AgentLoop(
+        model, _registry(steer_after_first_tool), run_control=control, mode="code"
+    ).run("Create the project", workspace=tmp_path)
+
+    assert state.status is AgentStatus.COMPLETED
+    second_input = model.requests[1].input
+    assert any("also add a README" in str(item.get("content", "")) for item in second_input)
+
+
+def test_abort_stops_before_the_next_model_turn(tmp_path: Path) -> None:
+    control = AgentRunControl()
+
+    def abort_after_first_tool(_arguments):
+        control.request_abort("stop for review")
+        return "done"
+
+    model = QueueModelClient(
+        [
+            _response("tool", calls=(_call("call_1"),)),
+            _response("should_not_run", text="This must not be requested"),
+        ]
+    )
+    state = AgentLoop(
+        model, _registry(abort_after_first_tool), run_control=control, mode="code"
+    ).run("inspect", workspace=tmp_path)
+
+    assert state.status is AgentStatus.ABORTED
+    assert state.step == 1
+    assert len(model.requests) == 1
 
 
 def test_safe_command_redacts_common_secret_arguments() -> None:
@@ -326,7 +656,7 @@ def test_invalid_provider_api_error_is_not_retried(tmp_path: Path) -> None:
     assert model.attempts == 1
 
 
-def test_multiple_consecutive_tool_calls_are_fed_back_to_model(
+def test_provider_parallel_tool_calls_are_rejected_after_the_first_call(
     tmp_path: Path,
 ) -> None:
     first_calls = (_call("call_1", value="one"), _call("call_2", value="two"))
@@ -352,7 +682,7 @@ def test_multiple_consecutive_tool_calls_are_fed_back_to_model(
     ]
     assert [observation.content for observation in state.observations] == [
         "one",
-        "two",
+        "Only one tool call is executed per model turn. The workspace may have changed after the first call; reissue this operation after reading that result.",
         "three",
     ]
     second_input = model.requests[1].input
@@ -528,6 +858,53 @@ def test_failed_verification_limits_repeated_diagnosis_reads(tmp_path: Path) -> 
     assert state.status is AgentStatus.MAX_STEPS
     assert "read_file" not in [tool.name for tool in model.requests[3].tools]
     assert "apply_patch" in [tool.name for tool in model.requests[3].tools]
+
+
+def test_repeated_failed_verification_does_not_restart_read_budget(
+    tmp_path: Path,
+) -> None:
+    """A weak model must not evade recovery by alternating test/read calls."""
+
+    registry = ToolRegistry(
+        [
+            ToolDefinition(
+                schema=FunctionTool("run_command", "run test", {"type": "object"}),
+                handler=lambda _arguments: {
+                    "command": ["pytest", "-q"],
+                    "cwd": ".",
+                    "return_code": 1,
+                    "timed_out": False,
+                    "stdout": "FAILED test_target",
+                    "stderr": "",
+                },
+            ),
+            ToolDefinition(
+                schema=FunctionTool("read_file", "read source", {"type": "object"}),
+                handler=lambda _arguments: "def broken(): pass",
+            ),
+            ToolDefinition(
+                schema=FunctionTool("apply_patch", "patch source", {"type": "object"}),
+                handler=lambda _arguments: {"applied": False},
+            ),
+        ]
+    )
+    model = QueueModelClient(
+        [
+            _response("failed_1", calls=(FunctionCall("test_1", "run_command", "{}"),)),
+            _response("read_1", calls=(FunctionCall("read_1", "read_file", "{}"),)),
+            _response("failed_2", calls=(FunctionCall("test_2", "run_command", "{}"),)),
+            _response("read_2", calls=(FunctionCall("read_2", "read_file", "{}"),)),
+            _response("final", text="Need a focused fix."),
+        ]
+    )
+
+    state = AgentLoop(model, registry, mode="code", max_steps=5).run(
+        "fix the failing test", workspace=tmp_path
+    )
+
+    assert state.status is AgentStatus.MAX_STEPS
+    assert "read_file" not in [tool.name for tool in model.requests[4].tools]
+    assert "apply_patch" in [tool.name for tool in model.requests[4].tools]
 
 
 def test_overlapping_read_ranges_are_not_counted_as_new_progress(
@@ -801,6 +1178,43 @@ def test_max_steps_is_a_hard_termination_condition(tmp_path: Path) -> None:
     assert state.step == 2
     assert state.final_answer is None
     assert len(model.requests) == 2
+
+
+def test_repeated_prose_finalization_stops_as_unverified(tmp_path: Path) -> None:
+    registry = ToolRegistry(
+        [
+            ToolDefinition(
+                schema=FunctionTool(
+                    name="create_file",
+                    description="create source",
+                    parameters={"type": "object", "properties": {}},
+                ),
+                handler=lambda _arguments: {
+                    "path": "snake.py",
+                    "changed_files": ["snake.py"],
+                },
+            )
+        ]
+    )
+    model = QueueModelClient(
+        [
+            _response(
+                "create",
+                calls=(FunctionCall("create", "create_file", "{}"),),
+            ),
+            _response("final_1", text="The game is complete."),
+            _response("final_2", text="The game is complete."),
+        ]
+    )
+
+    state = AgentLoop(model, registry, mode="code", max_steps=40).run(
+        "create a game", workspace=tmp_path
+    )
+
+    assert state.status is AgentStatus.UNVERIFIED
+    assert state.step == 3
+    assert state.final_answer == "The game is complete."
+    assert len(model.requests) == 3
 
 
 def test_agent_loop_sends_bounded_context_and_records_usage(tmp_path: Path) -> None:

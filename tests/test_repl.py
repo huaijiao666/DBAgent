@@ -2,11 +2,13 @@ import io
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from forge.agent import AgentStatus, ContextBudget, PlanStep, PlanStepStatus, TaskPlan
 from forge.agent.verification import VerificationStatus
 from forge.config import ForgeConfig
 from forge.llm import ModelCommunicationError
-from forge.repl import ForgeRepl, _default_context_budget
+from forge.repl import ForgeRepl, _apply_config_overrides, _default_context_budget
 from forge.tools import ToolObservation
 
 
@@ -92,11 +94,15 @@ def test_default_repl_profile_preserves_existing_large_context() -> None:
     assert budget.max_task_characters == 30_000
 
 
+def test_repl_rejects_unknown_ui_mode(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="ui_mode"):
+        ForgeRepl(workspace=tmp_path, ui_mode="web")
+
+
 def test_model_switch_uses_the_deepseek_context_profile(
     tmp_path: Path, monkeypatch
 ) -> None:
-    key_file = tmp_path / "deepseek-key.txt"
-    key_file.write_text("test-key\n", encoding="utf-8")
+    monkeypatch.setenv("FORGE_DEEPSEEK_API_KEY", "test-key")
     config = ForgeConfig(openai_api_key="configured-key")
     monkeypatch.setattr("forge.repl.load_repl_config", lambda _path: config)
     monkeypatch.setattr("forge.repl.AgentLoop", _FakeLoop)
@@ -110,7 +116,6 @@ def test_model_switch_uses_the_deepseek_context_profile(
         stream=io.StringIO(),
         model_factory=lambda _config: object(),
         registry_factory=lambda _workspace: object(),
-        deepseek_key_file=key_file,
     )
 
     assert repl.run() == 0
@@ -379,7 +384,7 @@ def test_repl_lists_and_resumes_a_specific_session(
 
     rendered = output.getvalue()
     assert first_id in rendered
-    assert "Use /resume <ID>" in rendered
+    assert "Use /resume <number>" in rendered
     assert "first task" in rendered
     assert "Plan restored true" in rendered
     assert "[assistant]\nanswer 1" in _FakeLoop.calls[-1][0]
@@ -468,11 +473,36 @@ def test_repl_applies_explicit_model_and_reasoning_overrides(
     assert created_configs[0].base_url == config.base_url
 
 
+def test_startup_deepseek_preset_switches_the_full_provider_configuration(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("FORGE_DEEPSEEK_API_KEY", "deepseek-test-secret")
+    configured = ForgeConfig(
+        openai_api_key="configured-provider-secret",
+        model="gpt-5.6-luna",
+        reasoning_effort="medium",
+        base_url="https://provider.example/v1",
+        api_mode="chat_completions",
+    )
+
+    selected = _apply_config_overrides(
+        configured,
+        model="deepseek-flash",
+        reasoning_effort="high",
+    )
+
+    assert selected.model == "deepseek-v4-flash"
+    assert selected.provider == "deepseek"
+    assert selected.base_url == "https://api.deepseek.com"
+    assert selected.api_mode == "chat_completions"
+    assert selected.reasoning_effort == "high"
+    assert selected.openai_api_key == "deepseek-test-secret"
+
+
 def test_repl_switches_presets_and_reasoning_without_persisting_a_key(
     tmp_path: Path, monkeypatch
 ) -> None:
-    key_file = tmp_path / "external-api-key.txt"
-    key_file.write_text("deepseek-test-secret\n", encoding="utf-8")
+    monkeypatch.setenv("FORGE_DEEPSEEK_API_KEY", "deepseek-test-secret")
     stream = io.StringIO()
     config = ForgeConfig(
         openai_api_key="configured-provider-secret",
@@ -499,7 +529,6 @@ def test_repl_switches_presets_and_reasoning_without_persisting_a_key(
         stream=stream,
         model_factory=lambda value: created.append(value) or object(),
         registry_factory=lambda _workspace: object(),
-        deepseek_key_file=key_file,
     )
 
     assert repl.run() == 0

@@ -180,6 +180,22 @@ def test_local_environment_file_cannot_be_written(tmp_path: Path) -> None:
     assert (tmp_path / ".env").read_text(encoding="utf-8") == "TOKEN=original"
 
 
+@pytest.mark.parametrize("name", ["api_key.txt", "config.toml"])
+def test_local_credential_file_cannot_be_written(tmp_path: Path, name: str) -> None:
+    (tmp_path / name).write_text("TOKEN=original", encoding="utf-8")
+    registry = create_coding_registry(tmp_path)
+
+    observation = _dispatch(
+        registry,
+        "write_file",
+        {"path": name, "content": "TOKEN=changed"},
+    )
+
+    assert observation.success is False
+    assert observation.content.startswith("PermissionError:")
+    assert (tmp_path / name).read_text(encoding="utf-8") == "TOKEN=original"
+
+
 def test_run_command_returns_structured_result(tmp_path: Path) -> None:
     (tmp_path / "check.py").write_text("print('ok')\n", encoding="utf-8")
     registry = create_coding_registry(tmp_path)
@@ -269,6 +285,27 @@ def test_apply_patch_normalizes_one_terminal_line_ending_from_provider(
     )
 
     assert observation.success is True
+    assert target.read_text(encoding="utf-8") == "after\n"
+
+
+def test_apply_patch_accepts_unambiguous_flat_single_file_provider_shape(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("before\n", encoding="utf-8")
+    registry = create_coding_registry(tmp_path)
+
+    observation = _dispatch(
+        registry,
+        "apply_patch",
+        {
+            "path": "target.txt",
+            "hunks": [{"old_lines": ["before"], "new_lines": ["after"]}],
+        },
+    )
+
+    assert observation.success is True
+    assert observation.content["changed_files"][0]["path"] == "target.txt"
     assert target.read_text(encoding="utf-8") == "after\n"
 
 

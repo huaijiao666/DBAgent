@@ -88,6 +88,7 @@ class _RelevantCode:
     label: str
     content: str
     source_call_id: str | None = None
+    source_path: str | None = None
 
 
 @dataclass(slots=True)
@@ -162,7 +163,12 @@ class ContextManager:
         self.repository_map = repository_map.strip()
 
     def add_relevant_code(
-        self, label: str, content: str, *, source_call_id: str | None = None
+        self,
+        label: str,
+        content: str,
+        *,
+        source_call_id: str | None = None,
+        source_path: str | None = None,
     ) -> None:
         if not label.strip() or not content:
             return
@@ -173,6 +179,7 @@ class ContextManager:
                 min(6_000, self.budget.max_relevant_code_characters),
             ),
             source_call_id=source_call_id,
+            source_path=source_path,
         )
         self._relevant_code = [
             existing
@@ -181,6 +188,23 @@ class ContextManager:
         ]
         self._relevant_code.append(entry)
         self._trim_relevant_code()
+
+    def invalidate_relevant_code(self, paths: Sequence[str]) -> None:
+        """Discard retained snippets whose source files have changed locally.
+
+        Tool observations remain useful evidence, but source snippets must not
+        survive a successful edit of their file: they would otherwise give the
+        next model turn stale code alongside the current workspace.
+        """
+
+        normalized = {path.replace("\\", "/") for path in paths if path}
+        if not normalized:
+            return
+        self._relevant_code = [
+            entry
+            for entry in self._relevant_code
+            if entry.source_path is None or entry.source_path not in normalized
+        ]
 
     def record_turn(
         self,
@@ -257,8 +281,15 @@ class ContextManager:
         recent_records = self._observations[
             -self.budget.recent_observation_count :
         ]
-        recent_items, _included_sequences = self._render_recent_items(recent_records)
-        summary_records = self._observations[:-1]
+        recent_items, included_sequences = self._render_recent_items(recent_records)
+        # A retained native function-call/output pair must not also be rendered
+        # in the compact history.  Keeping both wastes budget and makes one
+        # event look like two independent observations to the model.
+        summary_records = [
+            record
+            for record in self._observations
+            if record.sequence not in included_sequences
+        ]
 
         task_text = _truncate_middle(
             self.persistent_task_context,
@@ -353,6 +384,11 @@ class ContextManager:
     ) -> None:
         if not observation.success:
             return
+        if call.name in {"apply_patch", "create_file", "write_file"}:
+            self.invalidate_relevant_code(
+                _changed_paths(call, observation)
+            )
+            return
         if call.name == "get_repo_map" and isinstance(observation.content, str):
             self.set_repository_map(observation.content)
             return
@@ -371,10 +407,16 @@ class ContextManager:
             or call.call_id
         )
         label = f"{call.name}: {label_value}"
+        source_path = (
+            str(arguments["path"]).replace("\\", "/")
+            if isinstance(arguments.get("path"), str)
+            else None
+        )
         self.add_relevant_code(
             label,
             _content_as_text(observation.content),
             source_call_id=call.call_id,
+            source_path=source_path,
         )
 
     def _trim_relevant_code(self) -> None:
@@ -391,6 +433,7 @@ class ContextManager:
                         max(100, self.budget.max_relevant_code_characters - 100),
                     ),
                     only.source_call_id,
+                    only.source_path,
                 )
                 break
             self._relevant_code.pop(0)
@@ -737,6 +780,26 @@ def _parse_arguments(arguments_json: str) -> dict[str, Any]:
     except (json.JSONDecodeError, TypeError):
         return {}
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _changed_paths(
+    call: FunctionCall, observation: ToolObservation
+) -> list[str]:
+    """Extract changed workspace-relative paths from mutation evidence."""
+
+    arguments = _parse_arguments(call.arguments_json)
+    paths: list[str] = []
+    content = observation.content
+    if isinstance(content, Mapping):
+        values = content.get("changed_files")
+        if isinstance(values, Sequence) and not isinstance(values, (str, bytes)):
+            for value in values:
+                path = value.get("path") if isinstance(value, Mapping) else value
+                if isinstance(path, str):
+                    paths.append(path)
+    if not paths and isinstance(arguments.get("path"), str):
+        paths.append(str(arguments["path"]))
+    return paths
 
 
 def _content_as_text(content: Any) -> str:

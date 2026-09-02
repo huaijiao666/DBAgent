@@ -95,7 +95,9 @@ def test_ask_mode_exposes_no_edit_or_plan_tools(tmp_path: Path) -> None:
     assert "apply_patch" not in names
 
 
-def test_code_mode_keeps_editing_and_plan_tools(tmp_path: Path) -> None:
+def test_code_mode_keeps_editing_tools_and_uses_runtime_plan_when_applicable(
+    tmp_path: Path,
+) -> None:
     model = ScriptedModel([_response("final", text="No change needed")])
 
     state = AgentLoop(model, _registry(), mode="code").run(
@@ -104,12 +106,21 @@ def test_code_mode_keeps_editing_and_plan_tools(tmp_path: Path) -> None:
 
     names = {tool.name for tool in model.requests[0].tools}
     assert state.mode is TaskMode.CODE
-    assert {"apply_patch", "create_file", "update_plan"} <= names
+    assert {"apply_patch", "create_file"} <= names
+    assert "update_plan" not in names
+    assert state.plan is not None
+    assert [step.step_id for step in state.plan.steps] == [
+        "inspect",
+        "implement",
+        "verify",
+        "deliver",
+    ]
 
 
 def test_code_mode_instructions_preserve_multifile_deliverables() -> None:
     instructions = instructions_for_mode(TaskMode.CODE)
 
+    assert "Simplified Chinese" in instructions
     assert "multiple files, modules, or assets" in instructions
     assert "do not silently collapse a multi-file project" in instructions
 

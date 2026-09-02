@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DBAgent — 本地编程 Agent</title>
+    <link rel="stylesheet" href="/assets/app.css" />
+    <style>
+      .session-process-line small { min-width:0; overflow-wrap:anywhere; font:11px/1.5 var(--sans); white-space:normal; }
+    </style>
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+      <header class="topbar">
+        <div class="brand"><span class="brand-mark">DB</span><span>DBAgent</span></div>
+        <div class="top-status"><span id="connection-dot" class="dot"></span><span id="connection">正在连接本地服务…</span><span class="top-divider">·</span><span id="run-clock">0.0s</span></div>
+        <div class="top-actions"><button id="new-session" class="header-button" title="新建本地会话"><svg class="ui-icon" aria-hidden="true"><use href="#i-plus" /></svg>新建</button><button id="open-sessions" class="header-button" title="恢复本地会话"><svg class="ui-icon" aria-hidden="true"><use href="#i-history" /></svg>会话</button><button id="refresh" class="icon-button" title="刷新工作区"><svg class="ui-icon" aria-hidden="true"><use href="#i-refresh" /></svg></button></div>
+      </header>
+
+      <aside class="sidebar">
+        <section class="workspace-section">
+          <h2>工作区</h2>
+          <div class="workspace-input"><input id="workspace-path" aria-label="本地工作区路径" /><button id="choose-workspace" title="通过原生窗口选择本地目录"><svg class="ui-icon" aria-hidden="true"><use href="#i-folder" /></svg></button><button id="apply-workspace" title="使用此目录">↵</button></div>
+          <p class="hint">工具只在此目录中本地执行；相关代码可能会发送到你配置的模型服务商。</p>
+        </section>
+        <section class="tree-section">
+          <div class="section-title"><h2>仓库</h2><button id="reload-tree" class="icon-button" title="刷新文件树"><svg class="ui-icon" aria-hidden="true"><use href="#i-refresh" /></svg></button></div>
+          <div id="file-tree" class="file-tree"><div class="muted">正在读取文件…</div></div>
+        </section>
+        <section class="session-section">
+          <div class="section-title"><h2>本地会话</h2></div>
+          <div id="session-summary" class="session-summary">尚未启动任务。</div><div class="session-buttons"><button id="sidebar-new-session" class="session-action">新建会话 <span>＋</span></button><button id="sidebar-sessions" class="session-action">查看或恢复 <span>→</span></button></div>
+          <div class="trace-note">结构化事件保存于 <code>.forge/trace.jsonl</code>。</div>
+        </section>
+      </aside>
+      <div id="left-resizer" class="resize-handle col-resizer" role="separator" aria-orientation="vertical" aria-label="调整仓库面板宽度" tabindex="0"></div>
+
+      <aside id="repo-preview" class="code-preview repo-preview" aria-label="仓库代码预览">
+        <div class="preview-heading"><div><h2>代码预览</h2><span>仓库文件</span></div><button class="icon-button close-preview" data-preview="repo" title="关闭所有仓库预览">×</button></div>
+        <div id="repo-tabs" class="file-tabs" role="tablist"></div>
+        <div id="repo-code-meta" class="code-meta"></div><pre id="repo-code" class="code-content">选择左侧仓库中的文件以预览代码。</pre>
+      </aside>
+      <div id="repo-preview-resizer" class="resize-handle col-resizer preview-resizer" role="separator" aria-orientation="vertical" aria-label="调整仓库代码预览宽度" tabindex="0"></div>
+
+      <main class="main-pane">
+        <section class="conversation">
+          <div class="session-bar"><strong id="session-title">会话</strong><span id="live-label" class="live-label">空闲</span></div>
+          <div id="conversation-log" class="conversation-log">
+            <article class="welcome"><div class="agent-avatar">DB</div><div><strong>DBAgent</strong><p>选择本地工作区，描述任务；执行证据会实时显示在下方。</p></div></article>
+          </div>
+        </section>
+        <div id="center-resizer" class="resize-handle row-resizer" role="separator" aria-orientation="horizontal" aria-label="调整对话和执行过程高度" tabindex="0"></div>
+        <section class="timeline-wrap">
+          <details id="activity-details" class="activity-details" open>
+            <summary><span>执行过程</span><span id="activity-summary">等待任务</span></summary>
+            <div class="timeline-heading"><div><h2>实时执行证据</h2><span id="current-action" class="current-action">等待任务</span></div><div class="telemetry"><div><strong id="metric-step">0 / 40</strong><span>步骤</span></div><div><strong id="metric-tool">—</strong><span>当前工具</span></div><div><strong id="metric-tokens">—</strong><span>模型用量</span></div><div><strong id="metric-context">—</strong><span>上下文用量</span></div></div></div>
+            <pre id="live-process-output" class="live-process-output" hidden></pre>
+            <div id="timeline" class="timeline"><div class="empty-state">工具调用、补丁、验证、恢复和最终状态将显示在这里。</div></div>
+          </details>
+        </section>
+        <section class="composer">
+          <div id="file-reference-menu" class="file-reference-menu" hidden></div>
+          <textarea id="task" rows="3" placeholder="描述你想完成的编程任务…"></textarea>
+          <div class="composer-actions">
+            <div class="control-group"><label>模式 <select id="mode"><option value="auto">自动</option><option value="ask">问答</option><option value="code">编码</option></select></label><label>模型 <select id="model"></select></label><label>推理 <select id="reasoning"></select></label><label>步数 <input id="max-steps" type="number" min="1" max="200" value="40" /></label></div>
+            <div class="composer-buttons"><button id="steer" class="secondary-button" disabled>发送指导</button><button id="abort" class="abort-button" disabled>停止</button><button id="run" class="run-button"><svg class="ui-icon" aria-hidden="true"><use href="#i-play" /></svg>运行任务 <span>⌃↵</span></button></div>
+          </div>
+        </section>
+      </main>
+
+      <div id="change-preview-resizer" class="resize-handle col-resizer preview-resizer" role="separator" aria-orientation="vertical" aria-label="调整变更代码预览宽度" tabindex="0"></div>
+      <aside id="change-preview" class="code-preview change-preview" aria-label="变更代码预览">
+        <div class="preview-heading"><div><h2>变更预览</h2><span>已编辑文件</span></div><button class="icon-button close-preview" data-preview="change" title="关闭所有变更预览">×</button></div>
+        <div id="change-tabs" class="file-tabs" role="tablist"></div>
+        <div id="change-code-meta" class="code-meta"></div><pre id="change-code" class="code-content">点击右侧“变更”中的文件以预览代码。</pre>
+      </aside>
+      <div id="right-resizer" class="resize-handle col-resizer" role="separator" aria-orientation="vertical" aria-label="调整检查器面板宽度" tabindex="0"></div>
+
+      <aside class="inspector">
+        <nav class="tabs"><button class="tab active" data-tab="plan">计划</button><button class="tab" data-tab="verification">验证</button><button class="tab" data-tab="changes">变更</button></nav>
+        <div id="plan-panel" class="inspector-panel active"><div class="panel-title"><h2>当前计划</h2><span id="plan-count">—</span></div><div id="plan-list" class="plan-list"><div class="muted">DBAgent 创建计划后会在此保留，直到新的计划生成。</div></div></div>
+        <div id="verification-panel" class="inspector-panel"><div class="panel-title"><h2>验证</h2><span id="verification-badge" class="status-badge idle">尚未运行</span></div><div id="verification-detail" class="verification-detail"><div class="metric"><span>状态</span><strong>尚未运行</strong></div><div class="metric"><span>证据</span><strong>等待中</strong></div></div></div>
+        <div id="changes-panel" class="inspector-panel"><div class="panel-title"><h2>已变更文件</h2><span id="changes-count">0 个文件 · +0 / −0</span></div><div id="changes-list" class="changes-list"><div class="muted">尚未报告本地变更。</div></div></div>
+        <div class="context-panel"><h2>本地安全</h2><p>文件工具会强制执行选定工作区边界。命令使用允许/拒绝策略、超时、输出上限和清理后的环境，但不是操作系统级沙箱。</p><p id="provider-context" class="muted"></p></div>
+      </aside>
+    </div>
+    <dialog id="sessions-dialog" class="sessions-dialog" aria-labelledby="sessions-title">
+      <div class="dialog-heading"><div><p class="eyebrow">本地工作区</p><h2 id="sessions-title">恢复会话</h2></div><button id="close-sessions" class="icon-button" aria-label="关闭会话列表">×</button></div>
+      <p class="dialog-hint">会话保存在当前工作区的 <code>.forge/sessions</code>；恢复后会带回压缩后的计划、验证状态与关键观察。</p>
+      <div id="sessions-list" class="sessions-list"><div class="muted">正在读取会话…</div></div>
+    </dialog>
+    <div id="toast" class="toast" role="status"></div>
+    <svg class="icon-sprite" aria-hidden="true"><symbol id="i-folder" viewBox="0 0 24 24"><path d="M3.5 6.5h6l1.7 2h9.3v9.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z"/><path d="M3.5 8.5h17"/></symbol><symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0 1.2 4.2"/><path d="M20 4.5v6h-6"/></symbol><symbol id="i-history" viewBox="0 0 24 24"><path d="M3.7 12a8.3 8.3 0 1 0 2.4-5.9L3.7 8.5"/><path d="M3.7 4.5v4h4"/><path d="M12 7.5v5l3.4 2"/></symbol><symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 10 7-10 7z"/></symbol><symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol></svg>
+    <script type="module" src="/assets/app.js"></script>
+  </body>
+</html>

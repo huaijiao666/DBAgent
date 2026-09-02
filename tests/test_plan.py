@@ -1,6 +1,6 @@
 import json
 
-from forge.agent import PlanStepStatus, PlanStore, update_plan_tool
+from forge.agent import PlanStepStatus, PlanStore, runtime_code_plan, update_plan_tool
 from forge.llm import FunctionCall
 from forge.tools import ToolRegistry
 
@@ -85,6 +85,33 @@ def test_plan_store_can_resume_an_unfinished_session_plan() -> None:
     assert resumed.plan is plan
     assert resumed.history == (plan,)
     assert plan.is_complete is False
+
+
+def test_runtime_code_plan_is_structured_and_can_advance_from_local_evidence() -> None:
+    store = PlanStore.resume(runtime_code_plan("修复测试失败", chinese=True))
+
+    assert store.plan is not None
+    assert [step.step_id for step in store.plan.steps] == [
+        "inspect",
+        "implement",
+        "verify",
+        "deliver",
+    ]
+    assert store.advance(
+        {
+            "inspect": PlanStepStatus.COMPLETED,
+            "implement": PlanStepStatus.IN_PROGRESS,
+        }
+    )
+    assert store.advance(
+        {
+            "implement": PlanStepStatus.COMPLETED,
+            "verify": PlanStepStatus.COMPLETED,
+            "deliver": PlanStepStatus.IN_PROGRESS,
+        }
+    )
+    assert store.advance({"deliver": PlanStepStatus.COMPLETED})
+    assert store.plan.is_complete
 
 
 def test_invalid_transition_and_plan_drift_are_rejected_without_mutation() -> None:

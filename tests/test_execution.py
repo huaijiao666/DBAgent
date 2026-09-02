@@ -61,6 +61,38 @@ def test_python3_alias_uses_the_active_python_environment(tmp_path: Path) -> Non
     assert Path(result.stdout.strip()).parent == Path(sys.executable).parent
 
 
+def test_command_allows_multiline_inline_python_without_a_shell(tmp_path: Path) -> None:
+    executor = CommandExecutor(Workspace(tmp_path))
+
+    result = executor.run(
+        ["python", "-c", "value = 40\nvalue += 2\nprint(value)"],
+        cwd=".",
+        timeout_seconds=10,
+    )
+
+    assert result.return_code == 0
+    assert result.stdout == "42\n"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["python", "-c", "open('app.py', 'w').write('changed')"],
+        ["python", "-c", "from pathlib import Path; Path('app.py').write_text('changed')"],
+        ["python", "-c", "import os; print(os.listdir('.'))"],
+        ["node", "-e", "require('fs').writeFileSync('app.js', 'changed')"],
+    ],
+)
+def test_inline_interpreter_filesystem_access_is_rejected(
+    tmp_path: Path,
+    command: list[str],
+) -> None:
+    executor = CommandExecutor(Workspace(tmp_path))
+
+    with pytest.raises(PermissionError, match="inline interpreter filesystem access"):
+        executor.run(command, cwd=".", timeout_seconds=10)
+
+
 def test_missing_executable_is_a_structured_command_result(tmp_path: Path) -> None:
     executor = CommandExecutor(Workspace(tmp_path))
 

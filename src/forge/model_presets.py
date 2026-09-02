@@ -15,8 +15,12 @@ from forge.config import ConfigurationError, ForgeConfig
 
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEFAULT_DEEPSEEK_KEY_FILE = Path.home() / ".dba" / "deepseek_api_key.txt"
-_LEGACY_DEEPSEEK_KEY_FILE = Path("C:/AAA/DBAgent/api_key.txt")
+
+
+def project_deepseek_key_path() -> Path:
+    """Return the ignored DeepSeek key file at the repository root."""
+
+    return Path(__file__).resolve().parents[2] / "api_key.txt"
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,7 +81,6 @@ def resolve_model_selection(
     *,
     active_config: ForgeConfig,
     startup_config: ForgeConfig,
-    deepseek_key_file: Path | None = None,
 ) -> ForgeConfig:
     """Build the next in-memory configuration for a model selection.
 
@@ -109,7 +112,7 @@ def resolve_model_selection(
             provider=startup_config.provider,
         )
     return ForgeConfig(
-        openai_api_key=load_deepseek_api_key(deepseek_key_file),
+        openai_api_key=load_deepseek_api_key(),
         model=preset.model,
         reasoning_effort=active_config.reasoning_effort,
         base_url=DEEPSEEK_BASE_URL,
@@ -119,39 +122,31 @@ def resolve_model_selection(
 
 
 def default_deepseek_key_file() -> Path:
-    """Resolve the external key file without embedding a user-specific path."""
+    """Resolve an explicit key path or the repository-local ignored file."""
 
     configured = os.environ.get("FORGE_DEEPSEEK_KEY_FILE", "").strip()
     if configured:
         return Path(configured).expanduser()
-    if _LEGACY_DEEPSEEK_KEY_FILE.is_file():
-        return _LEGACY_DEEPSEEK_KEY_FILE
-    return DEFAULT_DEEPSEEK_KEY_FILE
+    return project_deepseek_key_path()
 
 
 def load_deepseek_api_key(path: Path | None = None) -> str:
-    """Read exactly one API key from the user-authorized external file.
+    """Read one local DeepSeek key, preferring an explicit environment override."""
 
-    The key never enters an environment variable, session checkpoint, trace, or
-    rendered UI. Errors name only the file path, never its contents.
-    """
-
+    environment_key = os.environ.get("FORGE_DEEPSEEK_API_KEY", "").strip()
+    if environment_key:
+        return environment_key
     resolved_path = (path or default_deepseek_key_file()).expanduser()
     try:
         raw = resolved_path.read_text(encoding="utf-8-sig")
     except FileNotFoundError as error:
         raise ConfigurationError(
-            f"DeepSeek key file was not found: {resolved_path}. "
-            "Create that external file or choose another model."
+            f"DeepSeek key is not available. Set FORGE_DEEPSEEK_API_KEY or create "
+            f"one local key file at: {resolved_path}"
         ) from error
     except OSError as error:
-        raise ConfigurationError(
-            f"Unable to read DeepSeek key file: {resolved_path}"
-        ) from error
-
+        raise ConfigurationError(f"Unable to read DeepSeek key file: {resolved_path}") from error
     lines = [line.strip() for line in raw.splitlines() if line.strip()]
     if len(lines) != 1:
-        raise ConfigurationError(
-            "DeepSeek key file must contain exactly one non-empty key line"
-        )
+        raise ConfigurationError("DeepSeek key file must contain exactly one non-empty key line")
     return lines[0]

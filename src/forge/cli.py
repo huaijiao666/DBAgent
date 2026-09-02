@@ -42,8 +42,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--max-steps",
         type=_positive_integer,
-        default=40,
-        help="Maximum model turns before hard termination (default: 40).",
+        default=60,
+        help="Maximum model turns before hard termination (default: 60).",
     )
     parser.add_argument(
         "--mode",

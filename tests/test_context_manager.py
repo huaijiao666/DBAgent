@@ -339,3 +339,66 @@ def test_recent_read_is_not_duplicated_in_working_code_snapshot() -> None:
 
     assert "important_function" not in text_snapshot
     assert "important_function" in output["output"]
+
+
+def test_all_native_recent_observations_are_excluded_from_compact_history() -> None:
+    manager = ContextManager(
+        "Inspect files", budget=ContextBudget(recent_observation_count=2)
+    )
+    for index in range(2):
+        call = _call(f"read_{index}", "read_file", {"path": f"src/{index}.py"})
+        _record(
+            manager,
+            f"response_{index}",
+            call,
+            ToolObservation(
+                call_id=call.call_id,
+                tool_name=call.name,
+                success=True,
+                content=f"def current_{index}(): pass\n",
+            ),
+        )
+
+    snapshot = manager.build_context(step=3)
+    compact = str(snapshot.input_items[1]["content"])
+
+    assert "#read_0 read_file" not in compact
+    assert "#read_1 read_file" not in compact
+    assert snapshot.usage.compacted_observations == 0
+
+
+def test_successful_mutation_invalidates_retained_source_for_changed_path() -> None:
+    manager = ContextManager("Fix source")
+    read = _call("read_old", "read_file", {"path": "src/app.py"})
+    _record(
+        manager,
+        "response_read",
+        read,
+        ToolObservation(
+            call_id=read.call_id,
+            tool_name=read.name,
+            success=True,
+            content="def old_implementation(): pass\n",
+        ),
+    )
+    patch = _call(
+        "patch_new",
+        "apply_patch",
+        {"files": [{"path": "src/app.py", "hunks": []}]},
+    )
+    _record(
+        manager,
+        "response_patch",
+        patch,
+        ToolObservation(
+            call_id=patch.call_id,
+            tool_name=patch.name,
+            success=True,
+            content={"applied": True, "changed_files": [{"path": "src/app.py"}]},
+        ),
+    )
+
+    snapshot = manager.build_context(step=3)
+    rendered = str(snapshot.input_items[1]["content"])
+
+    assert "old_implementation" not in rendered

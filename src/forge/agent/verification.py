@@ -151,6 +151,16 @@ class VerificationTracker:
             and self.latest.mutation_generation == self.mutation_generation
         )
 
+    @property
+    def passing_kinds_for_current_files(self) -> frozenset[str]:
+        """Kinds of deterministic checks that passed after the latest edit."""
+
+        return frozenset(
+            record.kind
+            for record in self.history
+            if record.passed and record.mutation_generation == self.mutation_generation
+        )
+
     def latest_summary(self) -> str:
         if self.latest is None:
             return "status=not_run; no deterministic test, compiler, or linter evidence"
@@ -192,11 +202,24 @@ def suggested_verification_commands(
         "write_file",
     }:
         return ()
-    paths = _changed_paths(observation.content)
-    python_files = tuple(path for path in paths if path.casefold().endswith(".py"))
+    return suggested_verification_commands_for_paths(_changed_paths(observation.content))
+
+
+def suggested_verification_commands_for_paths(
+    paths: Sequence[str],
+) -> tuple[tuple[str, ...], ...]:
+    """Suggest compact checks for a batch of paths changed in one tool turn.
+
+    A compliant model may create several independent files in the same response.
+    One ``py_compile a.py b.py`` is clearer and consumes fewer follow-up tool
+    turns than one command suggestion per file.
+    """
+
+    unique_paths = tuple(dict.fromkeys(path for path in paths if isinstance(path, str)))
+    python_files = tuple(path for path in unique_paths if path.casefold().endswith(".py"))
     javascript_files = tuple(
         path
-        for path in paths
+        for path in unique_paths
         if path.casefold().endswith((".js", ".mjs", ".cjs"))
     )
     commands: list[tuple[str, ...]] = []
@@ -246,7 +269,7 @@ def classify_verification_command(command: Sequence[str]) -> str | None:
     ):
         return "test"
     if (
-        module == "compileall"
+        module in {"compileall", "py_compile"}
         or (executable in {"node", "node.exe"} and "--check" in arguments)
         or executable in {"mypy", "mypy.exe", "pyright", "pyright.exe", "tsc", "tsc.exe"}
         or (executable == "cargo" and first_argument == "check")

@@ -1,4 +1,9 @@
-"""Load a temporary provider configuration for the DBA interactive client."""
+"""Local provider configuration for interactive DBA sessions.
+
+The optional provider TOML lives beside the source checkout and is ignored by
+Git.  This keeps the DBA launcher self-contained without searching a user's
+home directory or persisting credentials into session data.
+"""
 
 from __future__ import annotations
 
@@ -15,89 +20,81 @@ from forge.config import (
     ForgeConfig,
 )
 
-_DEFAULT_BACKUP_RELATIVE_PATH = Path(
-    "Downloads"
-) / "WeChat Files" / "wxid_8lhimj8hmlcv22" / "FileStorage" / "File" / "2026-03" / "sxdt" / "config.toml"
+
+def project_config_path() -> Path:
+    """Return the ignored provider file located at the repository root."""
+
+    return Path(__file__).resolve().parents[2] / "config.toml"
 
 
-def default_backup_config_path() -> Path:
-    """Return the user-specific backup location without embedding a username."""
+def configured_config_path() -> Path | None:
+    """Return an explicit override without inspecting personal directories."""
 
-    configured = os.environ.get("FORGE_BACKUP_CONFIG", "").strip()
-    if configured:
-        return Path(configured).expanduser()
-    return Path.home() / _DEFAULT_BACKUP_RELATIVE_PATH
+    configured = (
+        os.environ.get("FORGE_CONFIG_PATH", "").strip()
+        or os.environ.get("FORGE_BACKUP_CONFIG", "").strip()
+    )
+    return Path(configured).expanduser() if configured else None
 
 
 def load_repl_config(path: Path | None = None) -> ForgeConfig:
-    """Load the backup provider when available, otherwise use process env.
-
-    The returned value owns the API key in memory only. This function never
-    mutates ``os.environ`` and never writes the configuration back to disk.
-    An explicit ``path`` is treated as required so a typo is not silently hidden.
-    """
+    """Load an explicit or repository-local TOML, then process environment."""
 
     if path is not None:
         return load_backup_config(path)
-
-    backup_path = default_backup_config_path()
-    if backup_path.is_file():
-        return load_backup_config(backup_path)
-
+    explicit_path = configured_config_path()
+    if explicit_path is not None:
+        return load_backup_config(explicit_path)
+    local_path = project_config_path()
+    if local_path.is_file():
+        return load_backup_config(local_path)
     config = ForgeConfig.from_env()
     if config.openai_api_key is None:
         raise ConfigurationError(
-            "Backup provider config was not found at "
-            f"{backup_path}. Set FORGE_BACKUP_CONFIG or OPENAI_API_KEY."
+            "No project-local config.toml was found and OPENAI_API_KEY is not set. "
+            "Create config.toml at the DBAgent repository root, set FORGE_CONFIG_PATH, "
+            "pass --config-path, or set OPENAI_API_KEY."
         )
     return config
 
 
 def load_backup_config(path: Path) -> ForgeConfig:
-    """Read the selected provider from a Codex-style TOML backup."""
+    """Read a selected compatible provider configuration only into memory."""
 
     try:
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as error:
-        raise ConfigurationError(f"Backup provider config was not found: {path}") from error
+        raise ConfigurationError(f"Provider config was not found: {path}") from error
     except OSError as error:
-        raise ConfigurationError(f"Unable to read backup provider config: {path}") from error
+        raise ConfigurationError(f"Unable to read provider config: {path}") from error
     except tomllib.TOMLDecodeError as error:
-        raise ConfigurationError(f"Backup provider config is invalid TOML: {path}") from error
+        raise ConfigurationError(f"Provider config is invalid TOML: {path}") from error
 
     provider_name = raw.get("model_provider")
     providers = raw.get("model_providers")
     if not isinstance(providers, Mapping):
-        raise ConfigurationError("Backup provider config has no model_providers table")
+        raise ConfigurationError("Provider config has no model_providers table")
     provider = providers.get(provider_name) if isinstance(provider_name, str) else None
     if not isinstance(provider, Mapping):
         if len(providers) == 1:
             provider = next(iter(providers.values()))
         else:
-            raise ConfigurationError(
-                "Backup provider config does not identify a usable model provider"
-            )
+            raise ConfigurationError("Provider config does not identify a usable model provider")
 
     base_url = _required_string(provider, "base_url")
     token = _required_string(provider, "experimental_bearer_token")
     if token == "<redacted>":
-        raise ConfigurationError("Backup provider bearer token is redacted")
-
-    model = _optional_string(raw, "model", DEFAULT_MODEL)
-    reasoning_effort = _optional_string(
-        raw,
-        "model_reasoning_effort",
-        DEFAULT_REASONING_EFFORT,
-    )
+        raise ConfigurationError("Provider bearer token is redacted")
     environment = dict(os.environ)
     environment.update(
         {
             "OPENAI_API_KEY": token,
             "FORGE_BASE_URL": base_url,
-            # The backup provider used by this project exposes Chat Completions.
             "FORGE_API_MODE": "chat_completions",
-            "FORGE_MODEL": model,
-            "FORGE_REASONING_EFFORT": reasoning_effort,
+            "FORGE_MODEL": _optional_string(raw, "model", DEFAULT_MODEL),
+            "FORGE_REASONING_EFFORT": _optional_string(
+                raw, "model_reasoning_effort", DEFAULT_REASONING_EFFORT
+            ),
         }
     )
     return ForgeConfig.from_env(environment)
@@ -112,6 +109,4 @@ def _required_string(values: Mapping[str, Any], name: str) -> str:
 
 def _optional_string(values: Mapping[str, Any], name: str, default: str) -> str:
     value = values.get(name, default)
-    if not isinstance(value, str) or not value.strip():
-        return default
-    return value.strip()
+    return value.strip() if isinstance(value, str) and value.strip() else default

@@ -73,12 +73,16 @@ class Workspace:
             relative = resolved.relative_to(self.root)
         except ValueError as error:
             raise ValueError(f"path escapes workspace: {original}") from error
-        if any(_is_local_environment_name(part) for part in relative.parts):
-            raise PermissionError("access to local environment files is blocked")
+        if any(is_local_secret_name(part) for part in relative.parts):
+            raise PermissionError("access to local credential files is blocked")
 
 
-def _is_local_environment_name(name: str) -> bool:
+def is_local_secret_name(name: str) -> bool:
+    """Return whether a conventional local credential file must stay private."""
+
     lowered = name.casefold()
-    return lowered == ".env" or (
-        lowered.startswith(".env.") and lowered != ".env.example"
+    return (
+        lowered in {"api_key.txt", "config.toml"}
+        or lowered == ".env"
+        or (lowered.startswith(".env.") and lowered != ".env.example")
     )

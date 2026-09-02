@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Protocol, cast
+from typing import Any, Callable, Protocol, cast
 
 from openai import (
     APIConnectionError,
@@ -80,30 +80,82 @@ class OpenAIResponsesClient:
         """Create one response and normalize provider-specific output."""
 
         parameters = self._build_parameters(request)
-        try:
-            response = self._client.responses.create(**parameters)
-        except APITimeoutError as error:
+        response = self._call_sdk(parameters)
+
+        return self._normalize_response(response)
+
+    def create_response_stream(
+        self,
+        request: ModelRequest,
+        *,
+        on_event: Callable[[str, dict[str, object]], None],
+    ) -> ModelResponse:
+        """Create one Responses API stream and return its completed response.
+
+        Streaming is intentionally an observability feature, not a second
+        conversation mechanism.  The agent still owns and sends the complete
+        local context on every turn; ``response.completed`` supplies the same
+        final response object that the ordinary path normalizes.
+
+        Only the count of partial tool-argument characters is surfaced.  Tool
+        arguments themselves remain untrusted until the completed response is
+        parsed by the normal local function-call path.
+        """
+
+        parameters = self._build_parameters(request)
+        parameters["stream"] = True
+        stream = self._call_sdk(parameters)
+        completed_response: Any | None = None
+        for event in stream:
+            event_type = str(getattr(event, "type", ""))
+            if event_type == "response.output_text.delta":
+                delta = getattr(event, "delta", "")
+                if isinstance(delta, str) and delta:
+                    on_event("text_delta", {"delta": delta})
+            elif event_type == "response.function_call_arguments.delta":
+                delta = getattr(event, "delta", "")
+                on_event(
+                    "tool_arguments_delta",
+                    {"characters": len(delta) if isinstance(delta, str) else 0},
+                )
+            elif event_type == "response.completed":
+                completed_response = getattr(event, "response", None)
+
+        if completed_response is None:
+            raise ModelProtocolError(
+                "OpenAI streaming response ended without response.completed"
+            )
+        return self._normalize_response(completed_response)
+
+    @staticmethod
+    def _raise_wrapped_error(error: APIError) -> None:
+        if isinstance(error, APITimeoutError):
             raise ModelTimeoutError(
                 "OpenAI request timed out after configured SDK retries"
             ) from error
-        except RateLimitError as error:
+        if isinstance(error, RateLimitError):
             raise ModelRateLimitError(
                 "OpenAI rate limit exceeded after configured SDK retries",
                 status_code=getattr(error, "status_code", 429),
                 request_id=getattr(error, "request_id", None),
             ) from error
-        except APIConnectionError as error:
+        if isinstance(error, APIConnectionError):
             raise ModelConnectionError("Unable to reach the OpenAI API") from error
-        except APIStatusError as error:
+        if isinstance(error, APIStatusError):
             raise ModelAPIError(
                 "OpenAI API returned an unsuccessful status",
                 status_code=getattr(error, "status_code", None),
                 request_id=getattr(error, "request_id", None),
             ) from error
-        except APIError as error:
-            raise ModelAPIError("OpenAI API request failed") from error
+        raise ModelAPIError("OpenAI API request failed") from error
 
-        return self._normalize_response(response)
+    def _call_sdk(self, parameters: dict[str, Any]) -> Any:
+        """Call the official client once while preserving existing error types."""
+
+        try:
+            return self._client.responses.create(**parameters)
+        except APIError as error:
+            self._raise_wrapped_error(error)
 
     def _build_parameters(self, request: ModelRequest) -> dict[str, Any]:
         tools: list[dict[str, Any]] = []

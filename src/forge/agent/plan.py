@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any
 
@@ -156,6 +156,34 @@ class PlanStore:
             },
         )
 
+    def advance(self, statuses: Mapping[str, PlanStepStatus]) -> bool:
+        """Advance named steps from local runtime evidence.
+
+        A provider may omit ``update_plan`` during a long tool run. The runtime
+        still needs a truthful visible plan, so this method permits only the
+        same forward-only transitions validated for model-authored updates.
+        """
+
+        if self._plan is None or not statuses:
+            return False
+        steps = tuple(
+            replace(step, status=statuses[step.step_id])
+            if step.step_id in statuses and step.status is not statuses[step.step_id]
+            else step
+            for step in self._plan.steps
+        )
+        candidate = TaskPlan(
+            goal=self._plan.goal,
+            success_criteria=self._plan.success_criteria,
+            steps=steps,
+        )
+        if candidate == self._plan:
+            return False
+        self._validate_update(candidate)
+        self._plan = candidate
+        self._history.append(candidate)
+        return True
+
     def _validate_update(self, candidate: TaskPlan) -> None:
         assert self._plan is not None
         if candidate.goal != self._plan.goal:
@@ -202,6 +230,41 @@ class PlanStore:
                 f"invalid status transition for step {old.step_id}: "
                 f"{old.status.value} -> {new.status.value}"
             )
+
+
+def runtime_code_plan(task: str, *, chinese: bool) -> TaskPlan:
+    """Create a deterministic fallback plan for one coding task.
+
+    This is deliberately not a second Planner Agent. The working model may
+    still add steps through ``update_plan``; the fallback simply ensures that
+    runtime evidence always has a stable plan to update and present.
+    """
+
+    if chinese:
+        criteria = (
+            "目标功能已落实为工作区中的可运行代码。",
+            "已运行与本次改动匹配的确定性检查，并记录结果。",
+            "最终说明包含变更、验证证据及必要的运行方式。",
+        )
+        steps = (
+            PlanStep("inspect", "确认目标、现有代码和运行约束", PlanStepStatus.IN_PROGRESS),
+            PlanStep("implement", "完成最小且完整的实现或修复", PlanStepStatus.PENDING),
+            PlanStep("verify", "运行针对性的自动化验证", PlanStepStatus.PENDING),
+            PlanStep("deliver", "整理运行方式、变更和验证结论", PlanStepStatus.PENDING),
+        )
+    else:
+        criteria = (
+            "The requested behavior exists as runnable workspace code.",
+            "A deterministic check appropriate to the change has run and its result is recorded.",
+            "The final response states changes, verification evidence, and required run instructions.",
+        )
+        steps = (
+            PlanStep("inspect", "Inspect the goal, existing code, and execution constraints", PlanStepStatus.IN_PROGRESS),
+            PlanStep("implement", "Implement the smallest complete change", PlanStepStatus.PENDING),
+            PlanStep("verify", "Run targeted deterministic verification", PlanStepStatus.PENDING),
+            PlanStep("deliver", "Summarize run instructions, changes, and evidence", PlanStepStatus.PENDING),
+        )
+    return TaskPlan(goal=task.strip(), success_criteria=criteria, steps=steps)
 
 
 def update_plan_tool(store: PlanStore) -> ToolDefinition:

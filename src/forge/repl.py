@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 import sys
+import threading
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,6 +13,7 @@ from typing import Any, TextIO
 
 from forge.agent import (
     AgentLoop,
+    AgentRunControl,
     AgentStatus,
     ContextBudget,
     SessionContext,
@@ -30,17 +33,15 @@ from forge.llm import (
     OpenAIChatCompletionsClient,
     OpenAIResponsesClient,
 )
-from forge.model_presets import (
-    default_deepseek_key_file,
-    model_presets,
-    resolve_model_selection,
-)
+from forge.model_presets import model_presets, resolve_model_selection
 from forge.llm.provider_policy import provider_policy
 from forge.provider_config import load_repl_config
 from forge.session_store import SessionStore
 from forge.tools import ToolRegistry, create_coding_registry
 from forge.trace import TraceRecorder
+from forge.tui import FullscreenTUI
 from forge.ui import TerminalUI
+from forge.web_ui import run_browser_ui
 from forge.workspace import Workspace
 
 
@@ -151,12 +152,11 @@ class ForgeRepl:
         self,
         *,
         workspace: Path,
-        max_steps: int = 40,
+        max_steps: int = 60,
         trace_file: Path | None = None,
         config_path: Path | None = None,
         model_override: str | None = None,
         reasoning_effort_override: str | None = None,
-        deepseek_key_file: Path | None = None,
         mode: TaskMode | str = TaskMode.AUTO,
         discovery: WorkspaceDiscovery | None = None,
         context_budget: ContextBudget | None = None,
@@ -164,9 +164,13 @@ class ForgeRepl:
         stream: TextIO | None = None,
         model_factory: ModelFactory | None = None,
         registry_factory: Callable[[Path], ToolRegistry] = create_coding_registry,
+        ui_mode: str = "cli",
     ) -> None:
         if max_steps <= 0:
             raise ValueError("max_steps must be positive")
+        normalized_ui_mode = ui_mode.strip().lower()
+        if normalized_ui_mode not in {"cli", "tui"}:
+            raise ValueError("ui_mode must be cli or tui")
         self.workspace = Workspace(workspace).root
         self.max_steps = max_steps
         self.trace_file = trace_file
@@ -176,7 +180,6 @@ class ForgeRepl:
             reasoning_effort_override,
             "reasoning_effort_override",
         )
-        self.deepseek_key_file = deepseek_key_file or default_deepseek_key_file()
         self._mode = mode if isinstance(mode, TaskMode) else TaskMode(mode)
         self._discovery = discovery
         self._has_explicit_context_budget = context_budget is not None
@@ -186,8 +189,14 @@ class ForgeRepl:
         self.context_budget = context_budget
         self.input_function = input_function or input
         self.stream = stream or sys.stdout
+        # Injected input functions are deliberately kept synchronous so unit
+        # tests and programmatic embedding remain deterministic.  The actual
+        # DBA terminal enables a small cross-platform live-control poller.
+        self._supports_live_controls = input_function is None and stream is None
+        self._live_input_buffer = ""
         self._model_factory = model_factory or _create_model_client
         self._registry_factory = registry_factory
+        self.ui_mode = normalized_ui_mode
         self._conversation = LocalConversation()
         self._session_context = SessionContext()
         self._session_store = SessionStore(self.workspace)
@@ -200,6 +209,7 @@ class ForgeRepl:
         """Start the REPL and return a process-style exit code."""
 
         trace: TraceRecorder | None = None
+        ui: TerminalUI | None = None
         try:
             config = load_repl_config(self.config_path)
             config = _apply_config_overrides(
@@ -213,7 +223,7 @@ class ForgeRepl:
             # Named configured presets restore it after a DeepSeek switch.
             self._startup_config = config
             trace_path = _resolve_trace_path(self.workspace, self.trace_file)
-            ui = TerminalUI(stream=self.stream)
+            ui = self._create_ui()
             ui.set_mode(self._mode.value)
             ui.session_start(
                 workspace=self.workspace,
@@ -247,6 +257,10 @@ class ForgeRepl:
         except (ConfigurationError, OSError, ValueError, ModelCommunicationError) as error:
             if trace is not None:
                 trace.close()
+            if ui is not None:
+                closer = getattr(ui, "close", None)
+                if callable(closer):
+                    closer()
             safe_print(f"DBA failed to start: {error}", stream=self.stream)
             return 1
 
@@ -270,6 +284,17 @@ class ForgeRepl:
             )
         finally:
             trace.close()
+            if ui is not None:
+                closer = getattr(ui, "close", None)
+                if callable(closer):
+                    closer()
+
+    def _create_ui(self) -> TerminalUI:
+        """Select an explicit renderer; CLI remains safe for logs and CI."""
+
+        if self.ui_mode == "tui":
+            return FullscreenTUI(stream=self.stream)
+        return TerminalUI(stream=self.stream)
 
     def _loop(
         self,
@@ -373,17 +398,27 @@ class ForgeRepl:
                 )
 
             try:
-                state = AgentLoop(
+                run_control = (
+                    AgentRunControl() if self._supports_live_controls else None
+                )
+                agent_loop_parameters: dict[str, Any] = {
+                    "max_steps": self.max_steps,
+                    "mode": resolved_mode,
+                    "context_budget": self.context_budget,
+                    "initial_plan": resume_plan,
+                    "verification_required": verification_required,
+                    "trace": trace,
+                    "state_checkpoint": checkpoint,
+                }
+                if run_control is not None:
+                    agent_loop_parameters["run_control"] = run_control
+                agent_loop = AgentLoop(
                     model_client,
                     registry,
-                    max_steps=self.max_steps,
-                    mode=resolved_mode,
-                    context_budget=self.context_budget,
-                    initial_plan=resume_plan,
-                    verification_required=verification_required,
-                    trace=trace,
-                    state_checkpoint=checkpoint,
-                ).run(
+                    **agent_loop_parameters,
+                )
+                state = self._run_agent_task(
+                    agent_loop,
                     prompt,
                     workspace=self.workspace,
                     launch_directory=(
@@ -391,10 +426,21 @@ class ForgeRepl:
                         if self._discovery is not None
                         else self.workspace
                     ),
+                    ui=ui,
+                    run_control=run_control,
                 )
             except ModelCommunicationError as error:
                 if checkpoint_context is not None:
                     self._session_context = checkpoint_context
+                trace.record(
+                    "final",
+                    step=0,
+                    payload={
+                        "status": "ERROR",
+                        "verification_status": self._session_context.verification_status,
+                        "reason": type(error).__name__,
+                    },
+                )
                 ui.error(str(error))
                 self._conversation.add(
                     "assistant",
@@ -406,6 +452,15 @@ class ForgeRepl:
             except KeyboardInterrupt:
                 if checkpoint_context is not None:
                     self._session_context = checkpoint_context
+                trace.record(
+                    "final",
+                    step=0,
+                    payload={
+                        "status": "ABORTED",
+                        "verification_status": self._session_context.verification_status,
+                        "reason": "KeyboardInterrupt",
+                    },
+                )
                 self._conversation.add(
                     "assistant",
                     "The previous task was interrupted locally; its completed steps "
@@ -434,6 +489,142 @@ class ForgeRepl:
                     "The previous task stopped at max_steps before producing a final answer.",
                 )
             self._persist_session(ui)
+
+    def _run_agent_task(
+        self,
+        agent_loop: AgentLoop,
+        prompt: str,
+        *,
+        workspace: Path,
+        launch_directory: Path,
+        ui: TerminalUI,
+        run_control: AgentRunControl | None,
+    ) -> Any:
+        """Run synchronously for embedding, or poll live controls in DBA itself."""
+
+        if run_control is None:
+            return agent_loop.run(
+                prompt,
+                workspace=workspace,
+                launch_directory=launch_directory,
+            )
+
+        result: dict[str, Any] = {}
+        failure: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                result["state"] = agent_loop.run(
+                    prompt,
+                    workspace=workspace,
+                    launch_directory=launch_directory,
+                )
+            except BaseException as error:  # re-raised on the REPL thread
+                failure.append(error)
+
+        thread = threading.Thread(target=worker, name="dba-agent-run", daemon=True)
+        ui.info(
+            "Live controls active: type /steer <instruction> (or plain text) to "
+            "guide the next safe step; type /abort to stop before the next action."
+        )
+        thread.start()
+        while thread.is_alive():
+            try:
+                self._poll_live_controls(run_control, ui)
+            except KeyboardInterrupt:
+                run_control.request_abort("KeyboardInterrupt")
+                ui.info("Abort requested; waiting for the current safe boundary.")
+            thread.join(timeout=0.05)
+        if failure:
+            raise failure[0]
+        return result["state"]
+
+    def _poll_live_controls(
+        self,
+        run_control: AgentRunControl,
+        ui: TerminalUI,
+    ) -> None:
+        """Read complete terminal lines without blocking the running agent.
+
+        Windows uses ``msvcrt`` because ``select`` does not support console
+        handles.  POSIX terminals use ``select``.  This is intentionally a
+        small command channel, not a fragile full-screen terminal emulator.
+        """
+
+        if sys.platform == "win32":
+            import msvcrt
+
+            while msvcrt.kbhit():
+                character = msvcrt.getwch()
+                if character in {"\r", "\n"}:
+                    self._accept_live_control_line(self._live_input_buffer, run_control, ui)
+                    self._live_input_buffer = ""
+                    self._render_live_input(ui, "\n")
+                elif character == "\x03":
+                    raise KeyboardInterrupt
+                elif character in {"\b", "\x7f"}:
+                    if self._live_input_buffer:
+                        self._live_input_buffer = self._live_input_buffer[:-1]
+                        self._render_live_input(ui, "\b \b")
+                elif character.isprintable():
+                    self._live_input_buffer += character
+                    self._render_live_input(ui, character)
+            return
+
+        try:
+            import select
+
+            readable, _, _ = select.select([sys.stdin], [], [], 0)
+        except (OSError, ValueError):
+            return
+        if readable:
+            line = sys.stdin.readline()
+            if line:
+                self._accept_live_control_line(line, run_control, ui)
+
+    def _accept_live_control_line(
+        self,
+        line: str,
+        run_control: AgentRunControl,
+        ui: TerminalUI,
+    ) -> None:
+        normalized = line.strip()
+        if not normalized:
+            return
+        if normalized.casefold() == "/abort":
+            run_control.request_abort("user issued /abort")
+            ui.info("Abort requested. DBA will stop before the next model or tool action.")
+            return
+        if normalized.casefold().startswith("/steer"):
+            message = normalized[6:].strip()
+        elif normalized.casefold().startswith("/followup"):
+            message = normalized[9:].strip()
+        else:
+            message = normalized
+        if run_control.submit_steering(message):
+            ui.info("Steering accepted; it will be added to the next local model context.")
+        else:
+            ui.error("Use /steer <instruction>, /followup <instruction>, or /abort.")
+
+    def _write_live_input(self, value: str) -> None:
+        """Echo characters consumed by Windows' nonblocking console reader."""
+
+        try:
+            self.stream.write(value)
+            self.stream.flush()
+        except (AttributeError, OSError):
+            # The live control channel is a UX enhancement; a redirected or
+            # closed terminal must not affect the locally running agent.
+            pass
+
+    def _render_live_input(self, ui: TerminalUI, fallback: str) -> None:
+        """Send live input to TUI's input row or echo it in line mode."""
+
+        setter = getattr(ui, "set_live_input", None)
+        if callable(setter):
+            setter(self._live_input_buffer)
+            return
+        self._write_live_input(fallback)
 
     def _handle_command(
         self,
@@ -492,9 +683,11 @@ class ForgeRepl:
                     self._session_store.list_sessions(),
                     active_session_id=self._session_id,
                 )
-                ui.info("Use /resume <ID> or /resume latest to restore one session.")
+                ui.info(
+                    "Use /resume <number>, /resume <ID prefix>, or /resume latest."
+                )
                 return True, config, model_client
-            self._resume_session(ui, argument)
+            self._resume_session(ui, self._resolve_session_selection(argument))
             return True, config, model_client
         if command == "status":
             self._render_status(config, ui)
@@ -572,7 +765,6 @@ class ForgeRepl:
                     argument,
                     active_config=config,
                     startup_config=self._startup_config,
-                    deepseek_key_file=self.deepseek_key_file,
                 )
                 next_client = self._model_factory(next_config)
             except (ConfigurationError, ModelCommunicationError) as error:
@@ -708,6 +900,23 @@ class ForgeRepl:
                 + self._session_context.verification_summary
             )
 
+    def _resolve_session_selection(self, selection: str) -> str:
+        """Accept a list number or unambiguous ID prefix for fast local resume."""
+
+        normalized = selection.strip()
+        if normalized.casefold() == "latest":
+            return "latest"
+        sessions = self._session_store.list_sessions()
+        if normalized.isdecimal():
+            index = int(normalized) - 1
+            if 0 <= index < len(sessions):
+                return sessions[index].session_id
+            return normalized
+        matches = [
+            item.session_id for item in sessions if item.session_id.startswith(normalized)
+        ]
+        return matches[0] if len(matches) == 1 else normalized
+
     def _render_status(self, config: ForgeConfig, ui: TerminalUI) -> None:
         if self._last_state is None:
             ui.info("Session status")
@@ -784,14 +993,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--max-steps",
         type=_positive_integer,
-        default=40,
-        help="Maximum model turns per user request (default: 40).",
+        default=60,
+        help="Maximum model turns per user request (default: 60).",
     )
     parser.add_argument(
         "--mode",
         choices=[mode.value for mode in TaskMode],
         default=TaskMode.AUTO.value,
         help="Task mode: auto, ask, or code (default: auto).",
+    )
+    parser.add_argument(
+        "--ui",
+        choices=["cli", "tui", "web"],
+        default="cli",
+        help="Presentation mode: scrolling CLI, full-screen TUI, or local browser UI (default: cli).",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=0,
+        help="Loopback browser UI port (0 chooses a free port). Only used with --ui web.",
+    )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not open the local browser automatically with --ui web.",
     )
     parser.add_argument(
         "--trace-file",
@@ -803,18 +1029,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--config-path",
         type=Path,
         default=None,
-        help="External provider TOML path (default: known backup path).",
+        help="Explicit external provider TOML path (otherwise use the local automatic discovery).",
     )
     parser.add_argument(
         "--model",
         default=None,
-        help="Override the model from the backup config for this process.",
+        help="Override the model from the discovered provider configuration for this process.",
     )
     parser.add_argument(
         "--reasoning-effort",
         choices=sorted(SUPPORTED_REASONING_EFFORTS),
         default=None,
-        help="Override reasoning effort from the backup config for this process.",
+        help="Override reasoning effort from the discovered provider configuration for this process.",
     )
     arguments = parser.parse_args(argv)
     try:
@@ -822,6 +1048,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             arguments.workspace or Path.cwd(),
             discover_parent=arguments.discover_workspace,
         )
+        if arguments.ui == "web":
+            if arguments.port < 0 or arguments.port > 65535:
+                raise ValueError("--port must be from 0 to 65535")
+            return run_browser_ui(
+                discovery.root,
+                config_path=arguments.config_path,
+                max_steps=arguments.max_steps,
+                port=arguments.port,
+                open_browser=not arguments.no_browser,
+            )
         return ForgeRepl(
             workspace=discovery.root,
             max_steps=arguments.max_steps,
@@ -831,6 +1067,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             reasoning_effort_override=arguments.reasoning_effort,
             mode=arguments.mode,
             discovery=discovery,
+            ui_mode=arguments.ui,
         ).run()
     except (ConfigurationError, OSError, ValueError) as error:
         safe_print(f"DBA failed: {error}", stream=sys.stderr)
@@ -876,19 +1113,30 @@ def _apply_config_overrides(
     model: str | None,
     reasoning_effort: str | None,
 ) -> ForgeConfig:
-    """Apply explicit process-local overrides without touching backup or env."""
+    """Apply explicit process-local overrides without mutating the environment."""
 
     if model is None and reasoning_effort is None:
         return config
-    return ForgeConfig.from_env(
-        {
-            "OPENAI_API_KEY": config.openai_api_key or "",
-            "FORGE_BASE_URL": config.base_url or "",
-            "FORGE_API_MODE": config.api_mode,
-            "FORGE_PROVIDER": config.provider,
-            "FORGE_MODEL": model or config.model,
-            "FORGE_REASONING_EFFORT": reasoning_effort or config.reasoning_effort,
-        }
+    # Startup options must have the same semantics as the interactive
+    # ``/model`` command.  In particular, a named preset can change the
+    # provider, base URL, API mode, and in-memory credential—not merely the
+    # model string sent to the currently configured provider.
+    selected = (
+        resolve_model_selection(
+            model,
+            active_config=config,
+            startup_config=config,
+        )
+        if model is not None
+        else config
+    )
+    return ForgeConfig(
+        openai_api_key=selected.openai_api_key,
+        model=selected.model,
+        reasoning_effort=reasoning_effort or selected.reasoning_effort,
+        base_url=selected.base_url,
+        api_mode=selected.api_mode,
+        provider=selected.provider,
     )
 
 

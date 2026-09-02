@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
@@ -206,8 +207,12 @@ class CommandExecutor:
             raise ValueError("command contains too many arguments")
         if any(not isinstance(part, str) or not part for part in command):
             raise ValueError("every command argument must be a non-empty string")
-        if any("\x00" in part or "\n" in part or "\r" in part for part in command):
-            raise ValueError("command arguments must not contain control characters")
+        # Commands are passed to subprocess as an argv vector, never a shell
+        # string.  Newlines are therefore safe in an inline ``python -c`` (or
+        # similar) program and are useful for focused local diagnostics.  NUL
+        # remains forbidden because it cannot be represented in an argv item.
+        if any("\x00" in part for part in command):
+            raise ValueError("command arguments must not contain NUL characters")
 
         arguments = tuple(command)
         executable = Path(arguments[0]).name.casefold()
@@ -218,6 +223,7 @@ class CommandExecutor:
                 raise PermissionError(
                     f"git subcommand is blocked by policy: {arguments[1]}"
                 )
+        _reject_inline_filesystem_program(arguments, executable)
         for argument in arguments[1:]:
             candidate = Path(argument)
             if candidate.is_absolute() and not self._workspace.contains(candidate):
@@ -230,6 +236,45 @@ class CommandExecutor:
         ):
             arguments = (sys.executable, *arguments[1:])
         return arguments
+
+
+def _reject_inline_filesystem_program(
+    arguments: tuple[str, ...],
+    executable: str,
+) -> None:
+    """Keep ``run_command`` from becoming an untracked file-editing tool.
+
+    The coding harness provides bounded read tools and atomic edit tools. An
+    inline interpreter program that opens, writes, deletes, or enumerates
+    files bypasses those boundaries and makes changes invisible to patch and
+    verification tracking. This is a narrow static guard for common Python
+    and Node inline forms; it intentionally still permits harmless import and
+    syntax smoke checks such as ``python -c 'import tkinter'``.
+    """
+
+    flag = "-c" if executable.startswith("python") else "-e"
+    if executable not in {"python", "python.exe", "python3", "python3.exe", "node", "node.exe"}:
+        return
+    try:
+        source = arguments[arguments.index(flag) + 1]
+    except (ValueError, IndexError):
+        return
+    lowered = source.casefold()
+    forbidden = (
+        r"\bopen\s*\(",
+        r"\bpath\s*\(",
+        r"\bpathlib\.",
+        r"\bos\.(?:listdir|scandir|remove|unlink|rename|replace|mkdir|makedirs)",
+        r"\bshutil\.",
+        r"\brequire\s*\(\s*['\"]fs['\"]\s*\)",
+        r"\b(?:fs|filesystem)\.(?:readfile|writefile|appendfile|unlink|rename|readdir|mkdir)",
+    )
+    if any(re.search(pattern, lowered) for pattern in forbidden):
+        raise PermissionError(
+            "inline interpreter filesystem access is blocked by policy; use "
+            "list_files/read_file for inspection and create_file/write_file/"
+            "apply_patch for edits"
+        )
 
 
 def _sanitized_environment(

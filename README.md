@@ -15,6 +15,8 @@ runtime 已能探索仓库、维护有预算的本地 context 和 plan、调用�
 项目明确不使用 LangChain、LlamaIndex、任何 Agent SDK 或其他现成的
 coding-agent runtime。
 
+详细模块边界、状态归属和安全限制见 [架构说明](docs/architecture.md)。
+
 ## 环境要求
 
 - Python 3.11 或更高版本
@@ -51,6 +53,7 @@ python -m pip install -e '.[dev]'
 - `forge` — 运行 coding-agent loop。
 - `forge-smoke` — 发送一次文本请求，检查模型连接。
 - `DBA` / `dba` — 启动多轮本地 coding-agent REPL。
+- `forge-web` — 直接启动本地浏览器 dashboard（等价于 `DBA --ui web`）。
 
 ### Windows 一次性注册 DBA
 
@@ -68,14 +71,33 @@ cd C:\any\workspace
 DBA
 ```
 
-脚本不会读取、写入或打印 API key。`DBA` 启动时会自动读取用户目录下的备份
-provider TOML；如果备份文件不存在，才回退到环境变量配置。
+脚本不会读取、写入或打印 API key。`DBA` 会优先读取 repository 根目录中**被 Git
+忽略**的 `config.toml`；也可用 `FORGE_CONFIG_PATH` 或 `--config-path` 指向其他本地
+文件。找不到时才回退到当前进程环境变量。
 
 ## 配置与密钥
 
-Forge 从当前进程环境读取配置，**不会自动加载** `.env` 文件。`.env.example`
-仅用于列出变量名和安全默认值；不要把真实凭据写入该文件、源代码、测试、
-Git、README 或 trace。
+`DBA` 的 provider 配置可放在 repository 根目录中两个**只限本机**的文件：
+
+- `config.toml`：OpenAI-compatible provider 的 URL、模型和 token；可从
+  `config.toml.example` 复制后填写。
+- `api_key.txt`：DeepSeek API key，仅一行；`api_key.txt.example` 是空白安全模板。
+
+它们都被 `.gitignore` 忽略，绝不会被 package、trace、session 或 README 读取/写入。
+用户 clone 后自行复制模板或创建这两个文件并填写值。`.env.example` 只列出环境变量名
+和安全默认值；不要把真实凭据写入 `.env`、源代码、测试、Git、README 或 trace。
+
+一个 token 为空的 `config.toml` 模板示例：
+
+```toml
+model_provider = "openai_compatible"
+model = "gpt-5.6-sol"
+model_reasoning_effort = "medium"
+
+[model_providers.openai_compatible]
+base_url = "https://provider.example/v1"
+experimental_bearer_token = "<fill-your-local-token>"
+```
 
 | 变量 | 默认值 | 含义 |
 | --- | --- | --- |
@@ -84,7 +106,9 @@ Git、README 或 trace。
 | `FORGE_REASONING_EFFORT` | `medium` | 可选 `none`、`low`、`medium`、`high`、`xhigh`、`max` |
 | `FORGE_API_MODE` | `responses` | `responses` 或 `chat_completions` |
 | `FORGE_BASE_URL` | provider 默认值 | 可选的绝对 `http(s)` base URL |
-| `FORGE_DEEPSEEK_KEY_FILE` | `~/.dba/deepseek_api_key.txt` | DeepSeek 预设使用的 repository 外部 key 文件 |
+| `FORGE_DEEPSEEK_API_KEY` | 空 | DeepSeek key 的可选环境覆盖 |
+| `FORGE_DEEPSEEK_KEY_FILE` | `./api_key.txt` | DeepSeek key 文件的可选显式路径 |
+| `FORGE_CONFIG_PATH` | 空 | 可选的 provider TOML 显式路径 |
 
 PowerShell 临时会话示例：
 
@@ -126,7 +150,7 @@ forge "inspect this repository and explain its architecture" `
 ```text
 --workspace PATH       workspace 根目录（默认：精确当前目录）
 --discover-workspace   显式向父目录搜索最近项目根
---max-steps N          模型轮数硬上限（默认：40）
+--max-steps N          模型轮数硬上限（默认：60）
 --mode MODE            auto、ask 或 code（默认：auto）
 --trace-file PATH      workspace 内的 JSONL trace 路径
                        （默认：.forge/trace.jsonl）
@@ -171,6 +195,53 @@ OK   5.8s |  5/12 | 验证 VERIFY  status=passed  kind=test  return_code=0
 DBA --workspace .
 ```
 
+DBAgent 提供三种明确的本地展示模式，三者使用**完全相同**的 Agent loop、工具、
+session checkpoint 和 JSONL trace；差别只有交互呈现方式：
+
+```powershell
+# 默认：可滚动、适合录屏、重定向和 CI 的 CLI dashboard
+DBA --ui cli
+
+# 全屏：交互式 TTY 中的 alternate-screen dashboard
+DBA --ui tui
+
+# 浏览器 dashboard：本地 loopback 服务 + 浏览器三栏工作台
+DBA --ui web
+```
+
+TUI 不引入 Agent framework 或 hosted execution：它用标准库 ANSI alternate screen
+渲染 task、当前 plan、近期活动、文件改动、verification 和运行中的 steering 输入。
+退出时会恢复原来的终端内容。`--ui tui` 只在真实交互式 TTY 中可用；重定向输出、
+CI 或不支持 ANSI 的终端请使用 `--ui cli`。
+
+### 浏览器 dashboard
+
+`--ui web` 会在 `127.0.0.1` 启动一个带随机访问 token 的本地服务，并自动打开
+浏览器（不希望自动打开时使用 `--no-browser`）。它提供三栏工作台：左侧是
+workspace 与仓库树，中间是对话、实时执行 timeline 和任务输入，右侧是 plan、
+verification、改动文件与可刷新的 Git diff。运行中会显示当前 step、active tool、
+context/model token、耗时；可用 `Send guidance` 把补充约束排入下一安全边界，也可用
+`Stop` 请求 Agent 协作退出。
+
+浏览器工作台的对话区和执行时间线各自滚动，新增消息只会在你已经接近底部时自动跟随，
+不会把正在阅读的内容强行卷走。左、右两条竖向分隔条和对话/时间线之间的横向分隔条都可
+拖动（也支持方向键微调），布局会保存在当前浏览器的 `localStorage` 中；窄窗口会自动切换
+为单列布局。界面采用浅色、低装饰的代码工作台风格，重点突出文件、计划、验证和实际变更。
+
+```powershell
+# 在当前目录启动，自动选择空闲端口
+DBA --ui web --workspace .
+
+# 固定端口并手动复制终端输出的 localhost URL
+DBA --ui web --workspace . --port 8765 --no-browser
+```
+
+浏览器出于安全策略不能把“文件夹选择器”直接转换成服务器路径，因此 workspace
+输入框接受的是**运行 DBA 的这台机器上的绝对路径**；提交后后端会 canonicalize
+并验证目录存在。页面不会接收 API key，所有模型请求、文件访问、patch、命令和
+trace 仍在本地 Python 进程中执行。服务只绑定 loopback，随机 token 仅用于阻止
+同机其他页面随意调用控制 API；关闭终端进程即可停止服务。
+
 直接运行 `DBA` 与 `DBA --workspace .` 等价：默认 workspace 就是启动命令时的
 **精确当前目录**，不会因为父目录存在 `.git`、`pytest.ini` 或 `README.md` 而悄悄
 扩大权限范围。确实希望从 `src/package` 向上寻找项目根时，才显式使用：
@@ -179,14 +250,14 @@ DBA --workspace .
 DBA --discover-workspace
 ```
 
-如果备份配置中的模型在当前 provider 上不可用，可以只对本次进程显式覆盖，
-而不修改备份文件：
+如果环境配置中的模型在当前 provider 上不可用，可以只对本次进程显式覆盖，
+而不修改环境：
 
 ```powershell
 DBA --workspace . --model gpt-5.6-sol --reasoning-effort medium
 ```
 
-API key 和 URL 仍从备份自动读取；覆盖参数不会写入环境或配置文件。
+API key 和 URL 仍由当前启动进程的环境提供；覆盖参数不会写入环境或配置文件。
 
 如果没有注册全局命令，也可以在 repository 内激活虚拟环境后运行同一个命令。
 
@@ -207,7 +278,7 @@ hint，以及 patch、测试、命令和错误等关键工具 observation；下�
 每轮请求会原子保存到 workspace 的 `.forge/sessions/<SESSION_ID>.json`，其中只
 包含裁剪后的对话、plan、验证摘要和关键 observation，并沿用 trace 的敏感值
 脱敏规则。重新打开同一工作目录后，使用 `/sessions` 查看 ID，再用
-`/resume <ID>` 精确恢复；`/resume latest` 恢复最近更新的会话。旧版本的
+`/resume <ID>` 精确恢复；`/resume #` 可按列表序号恢复；`/resume latest` 恢复最近更新的会话。旧版本的
 `.forge/session.json` 会作为 `legacy` 会话继续可读。所有文件均受 `.gitignore`
 保护，不使用 provider 的服务端 conversation state。
 
@@ -231,9 +302,9 @@ hint，以及 patch、测试、命令和错误等关键工具 observation；下�
 ```text
 /models                显示可直接选择的模型别名与 provider
 /model                 显示模型别名；也可继续输入 provider 的原始模型名
-/model luna            使用启动时备份配置的 gpt-5.6-luna
-/model terra           使用启动时备份配置的 gpt-5.6-terra
-/model sol             使用启动时备份配置的 gpt-5.6-sol
+/model luna            使用启动时环境配置的 gpt-5.6-luna
+/model terra           使用启动时环境配置的 gpt-5.6-terra
+/model sol             使用启动时环境配置的 gpt-5.6-sol
 /model deepseek-flash  使用 DeepSeek V4 Flash
 /model deepseek-pro    使用 DeepSeek V4 Pro
 /reasoning             查看当前 reasoning effort 和可用等级
@@ -248,7 +319,7 @@ hint，以及 patch、测试、命令和错误等关键工具 observation；下�
 /capabilities          查看当前 provider 实际生效的工具/推理能力
 /plan                  查看当前会话保留的最新结构化 plan
 /sessions              列出当前 workspace 的会话 ID、时间、轮数和验证状态
-/resume <ID>           恢复指定会话
+/resume <ID|#>         按完整 ID、唯一前缀或会话列表序号恢复
 /resume latest         恢复最近更新的会话
 /continue [N]          继续当前未完成 plan；可选地设定新的 step budget
 /new                   开始新会话并保留已有会话
@@ -257,23 +328,35 @@ hint，以及 patch、测试、命令和错误等关键工具 observation；下�
 /exit                  退出 DBA
 ```
 
+在正常交互式终端的一次任务执行期间，也可直接输入 `/steer <指令>`（或直接输入
+一行普通文本）补充下一安全边界的用户指令；输入 `/abort` 会阻止下一次模型请求或
+本地工具执行。它不会伪称能取消正在飞行中的 HTTP 请求或已启动的子进程。Responses
+API 路径还会显示经过小批量整理的服务端文本增量；工具参数不会在完成前被当作可执行
+数据展示或执行。
+
+为复现本项目已测试的开发依赖，可在新虚拟环境中执行：
+
+```powershell
+python -m pip install -r requirements.lock
+python -m pip install -e .
+python -m pytest
+```
+
 `max_steps` 不是模型能力的固定上限，而是 DBAgent 每个本地 Agent run 的安全预算：
-它避免模型、provider 或工具异常时无限消耗时间和额度。普通命令默认 40 步；可用
+它避免模型、provider 或工具异常时无限消耗时间和额度。普通命令默认 60 步；可用
 `DBA --max-steps 64`、REPL 中的 `/steps 64`，或在已中断任务后直接
 `/continue 64`。续跑会恢复本地 plan、关键 observation 和验证状态，但开始一个新的、
 明确受限的 Agent run，而不是悄悄无限循环。
 
-`DBA` 默认优先读取用户目录下的备份 provider TOML（也可以用
-`--config-path PATH` 或环境变量 `FORGE_BACKUP_CONFIG` 指定其他文件），提取当前 provider 的 `base_url`、
-`experimental_bearer_token`、`model` 和 `model_reasoning_effort`。这些值只
-进入当前 Python 进程中的配置对象，不会修改父进程环境；备份文件必须放在
-repository 外，不要提交或复制到 trace。
+`DBA` 不再扫描用户目录或任何聊天软件备份；它只从 repository 根目录的忽略文件
+`config.toml` 读取默认 provider 配置，或从 `FORGE_CONFIG_PATH`、兼容的
+`FORGE_BACKUP_CONFIG`、`--config-path` 和当前进程环境接收显式配置。凭据只进入当前
+进程内存，不会写入 session、trace 或 Git。
 
-选择 `/model deepseek-flash` 或 `/model deepseek-pro` 时，DBA 会在**当次
-切换**从配置的 repository 外部 key 文件读取唯一的非空 key 行，并使用
-`https://api.deepseek.com` 的 Chat Completions 兼容接口。该 key 不写入环境、
-session、trace、终端输出或本 repository；切回 `luna`、`terra` 或 `sol` 会恢复
-本次启动时的备份 provider 凭证和 URL。DeepSeek 的两个预设使用显式的
+选择 `/model deepseek-flash` 或 `/model deepseek-pro` 时，DBA 会优先读取
+`FORGE_DEEPSEEK_API_KEY`；没有时读取 repository 根目录中被忽略的 `api_key.txt`，并使用
+`https://api.deepseek.com` 的 Chat Completions 兼容接口。该 key 不写入 session、trace、终端输出或本 repository；切回 `luna`、
+`terra` 或 `sol` 会恢复本次启动时的 configured provider 凭证和 URL。DeepSeek 的两个预设使用显式的
 `deepseek` provider policy。由于该兼容接口在 thinking 与多轮工具历史组合下有
 额外协议要求，DBAgent 的本地工具任务会明确显示并强制使用 `thinking disabled`；
 `/reasoning` 只作为偏好保存，不代表 DeepSeek 工具轮实际启用了该能力。这样不会
@@ -315,21 +398,16 @@ forge-smoke "Reply with one short sentence."
 ## 临时 provider 环境（PowerShell）
 
 可选启动脚本
-[`scripts/forge-isolated.ps1`](<C:\AAA\DBAgent\DBAgent\scripts\forge-isolated.ps1>)
-可以从仓库外部的 TOML 文件读取 provider URL 和 bearer token，仅在 Forge 子
-进程期间设置环境变量，并在退出后恢复调用方环境：
+[`scripts/forge-isolated.ps1`](scripts/forge-isolated.ps1)
+适合只使用当前 PowerShell 进程中已有的 provider 环境变量；它不修改调用方环境：
 
 ```powershell
 .\scripts\forge-isolated.ps1 `
   -Task "inspect this repository and explain its architecture" `
-  -ConfigPath "C:\path\outside\the\repo\config.toml" `
-  -Model "gpt-5.6-luna" `
-  -ReasoningEffort max `
   --workspace . --max-steps 16
 ```
 
-请把 TOML 文件放在 repository 外并且绝不要提交。该脚本只是便捷封装，不能
-替代正式的 secret manager。
+若需要自动读取个人 TOML，请直接使用 `DBA`；该脚本仍适合 CI 或显式环境配置。
 
 ## 本地工具与安全模型
 
@@ -340,10 +418,11 @@ forge-smoke "Reply with one short sentence."
 - 编辑与检查：`apply_patch`、`create_file`、`write_file`、`git_diff`
 - 执行与规划：`run_command`、`update_plan`
 
-所有路径都会 resolve 并检查是否仍位于选定 workspace 内，包括 symlink escape
-检查。`apply_patch` 会在写入任何文件前校验全部 hunk；如果后续 replace 失败，
-会回滚已经替换的文件。命令具有 timeout、有限长度的 stdout/stderr 返回值和
-过滤后的环境变量。
+所有文件路径都会 resolve 并检查是否仍位于选定 workspace 内，包括 symlink
+escape 检查。`apply_patch` 会在写入任何文件前校验全部 hunk；如果后续 replace
+失败，会回滚已经替换的文件。命令具有 timeout、有限长度的 stdout/stderr 返回值和
+过滤后的环境变量；它使用 argv 而非 shell，但目前**不是 OS 级沙箱**，不应在不可信
+repository 或高权限机器上当作隔离边界。
 
 patch 被拒绝时终端会展示具体原因，例如 `context did not match`、`context is
 ambiguous` 或 `replacement makes no change`。失败是原子的；runtime 会要求模型
@@ -406,10 +485,10 @@ tests/                              unit、安全和端到端测试
 
 ## 已知限制
 
-- 当前终端是可录制的行式 dashboard，不是全屏 TUI；工具结果只显示脱敏事实摘要，
-  不会把完整源码、stdout 或模型隐藏 reasoning 直接刷屏。执行期间还没有完整的
-  steering/follow-up 输入队列，长任务主要依靠 checkpoint、`/continue` 和
-  `/resume` 恢复。
+- CLI dashboard 保持可录制和可重定向；TUI 是交互式 ANSI dashboard，浏览器模式是
+  loopback 三栏工作台。两种界面都不会把完整源码、stdout 或模型隐藏 reasoning 直接
+  刷屏；交互终端支持安全边界上的 `/steer`、`/followup` 和 `/abort`，浏览器提供
+  `Stop`，但都不支持在单次 HTTP 请求或运行中的子进程中强制抢占。
 - 模型行为和 provider 延迟具有不确定性；即使修复本身简单，任务也可能达到
   `INCOMPLETE`。
 - 第三方 OpenAI-compatible provider 的连接质量、响应延迟、模型语言和 function
@@ -434,7 +513,8 @@ tests/                              unit、安全和端到端测试
   覆盖的读取算作进展，但不会替代模型对证据是否充分的判断。
 - DeepSeek Chat Completions 兼容路径的 native tool calling 和 thinking 协议仍受
   provider 行为影响，默认稳定演示应优先选择已验证的 Responses provider。
-- 目前没有 dependency lockfile，因此不能保证完全可复现的依赖解析。
+- `requirements.lock` 固定了本项目在 Windows 上测试过的 Python 包版本；它不是
+  带哈希的跨平台供应链锁，也不替代受控环境中的镜像、Python 解释器版本和 OS 依赖。
 
 ## License
 

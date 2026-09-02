@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from forge.repository.models import RepositoryFile, RepositoryScan
-from forge.workspace import Workspace
+from forge.workspace import Workspace, is_local_secret_name
 
 MAX_REPOSITORY_FILES = 20_000
 
@@ -150,7 +150,4 @@ class RepositoryScanner:
 
 
 def _is_local_environment_name(name: str) -> bool:
-    lowered = name.casefold()
-    return lowered == ".env" or (
-        lowered.startswith(".env.") and lowered != ".env.example"
-    )
+    return is_local_secret_name(name)

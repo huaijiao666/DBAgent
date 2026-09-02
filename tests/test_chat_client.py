@@ -221,6 +221,31 @@ def test_chat_request_uses_nested_function_tools_and_instructions() -> None:
     assert "conversation" not in parameters
 
 
+def test_chat_request_preserves_strict_required_nullable_tool_defaults() -> None:
+    sdk = _sdk(_response(content="done"))
+    client = OpenAIChatCompletionsClient(_config(), sdk_client=sdk)
+    tool = FunctionTool(
+        name="read_file",
+        description="Read a file.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "start_line": {"type": ["integer", "null"]},
+            },
+            "required": ["path", "start_line"],
+            "additionalProperties": False,
+        },
+    )
+
+    client.create_response(ModelRequest(input="Read", tools=(tool,)))
+
+    parameters = sdk.chat.completions.create.call_args.kwargs
+    schema = parameters["tools"][0]["function"]["parameters"]
+    assert schema["required"] == ["path", "start_line"]
+    assert schema["properties"]["start_line"]["type"] == ["integer", "null"]
+
+
 def test_chat_request_uses_provider_non_thinking_extension_for_deepseek() -> None:
     sdk = _sdk(_response(content="done"))
     config = ForgeConfig(

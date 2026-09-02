@@ -11,7 +11,7 @@ from forge.llm import FunctionTool
 from forge.tools.models import ToolDefinition, object_schema
 from forge.tools.repository import register_repository_tools
 from forge.tools.registry import ToolRegistry
-from forge.workspace import Workspace
+from forge.workspace import Workspace, is_local_secret_name
 
 _EXCLUDED_DIRECTORIES = frozenset(
     {
@@ -186,6 +186,8 @@ def _optional_positive_integer(
     arguments: Mapping[str, Any], name: str, *, default: int
 ) -> int:
     value = arguments.get(name, default)
+    if value is None:
+        return default
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{name} must be a positive integer")
     return value
@@ -243,10 +245,7 @@ def _iter_files(workspace: Workspace, root: Path) -> Iterator[Path]:
 
 
 def _is_local_environment_name(name: str) -> bool:
-    lowered = name.casefold()
-    return lowered == ".env" or (
-        lowered.startswith(".env.") and lowered != ".env.example"
-    )
+    return is_local_secret_name(name)
 
 
 def _reject_excluded_path(workspace: Workspace, path: Path) -> None:

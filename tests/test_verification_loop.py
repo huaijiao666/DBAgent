@@ -11,6 +11,7 @@ from forge.agent import (
 from forge.agent.verification import (
     classify_verification_command,
     suggested_verification_commands,
+    suggested_verification_commands_for_paths,
 )
 from forge.llm import FunctionCall, ModelResponse
 from forge.trace import TraceRecorder
@@ -52,6 +53,12 @@ def test_changed_source_files_receive_deterministic_syntax_suggestions() -> None
         ("python", "-m", "py_compile", "app.py"),
     )
     assert suggested_verification_commands(javascript_call, javascript_observation) == (
+        ("node", "--check", "web/game.js"),
+    )
+    assert suggested_verification_commands_for_paths(
+        ("app.py", "web/game.js", "app.py", "other.py")
+    ) == (
+        ("python", "-m", "py_compile", "app.py", "other.py"),
         ("node", "--check", "web/game.js"),
     )
 
@@ -116,6 +123,9 @@ def test_verification_classifier_ignores_test_words_inside_workspace_paths() -> 
     assert classify_verification_command(
         ["python", "-m", "pytest", "-q"]
     ) == "test"
+    assert classify_verification_command(
+        ["python", "-m", "py_compile", "snake.py"]
+    ) == "compiler"
     assert classify_verification_command(["node", "tests.js"]) == "test"
     assert classify_verification_command(["node", "--test"]) == "test"
     assert classify_verification_command(["node", "--check", "game.js"]) == "compiler"
@@ -365,6 +375,7 @@ def test_passing_evidence_becomes_stale_after_a_successful_edit() -> None:
         test_call,
         ToolObservation("test", "run_command", True, passing_content),
     )
+    assert tracker.passing_kinds_for_current_files == frozenset({"test"})
     patch_call = FunctionCall(
         call_id="patch",
         name="apply_patch",
@@ -384,6 +395,7 @@ def test_passing_evidence_becomes_stale_after_a_successful_edit() -> None:
     assert event.mutation is True
     assert tracker.status is VerificationStatus.STALE
     assert tracker.is_verified is False
+    assert tracker.passing_kinds_for_current_files == frozenset()
 
 
 def test_no_progress_rounds_add_recovery_guidance_to_next_request(

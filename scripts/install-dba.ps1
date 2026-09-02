@@ -6,8 +6,8 @@
     The project remains isolated in its repository virtual environment. This
     script optionally creates that environment, installs the package in
     editable mode, and adds only its Scripts directory to the current user's
-    PATH. API credentials are not read or written by this script; the DBA
-    process loads the configured backup provider at startup.
+ PATH. API credentials are not read or written by this script; DBA loads only
+ the Git-ignored provider files at this repository root when it starts.
 #>
 
 [CmdletBinding()]
@@ -97,4 +97,4 @@ if ($null -eq $processHasScripts -or @($processHasScripts).Count -eq 0) {
 
 Write-Output "DBA is available from new terminals through: $venvScripts"
 Write-Output "Example: cd C:\any\workspace; DBA --workspace ."
-Write-Output 'The DBA process will load the external backup provider automatically; no API key was written.'
+Write-Output 'DBA reads an optional ignored config.toml and api_key.txt at this repository root; no API key was written.'
