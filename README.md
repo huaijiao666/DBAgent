@@ -1,7 +1,6 @@
 # DataBaseAgent（DBAgent）
 
-> 从零实现的本地、repository-aware、self-verifying Coding Agent Harness。DB 是
-> Database 的缩写；它是通用编程智能体，不是数据库专用工具。
+> 从零实现的本地、repository-aware、self-verifying Coding Agent Harness。
 
 **Git 仓库：** <https://github.com/huaijiao666/DBAgent>
 
@@ -152,5 +151,3 @@ repository/service/CLI/tests 的跨层 feature 和 self-verifying loop。已观�
 - [使用与配置](docs/usage.md)：安装、provider、本地凭据、命令、会话和 UI。
 - [端到端任务记录](docs/e2e-demo.md)：三个独立 fixture 任务及已观察到的结果。
 - [提交版 README.txt](submission/README.txt)：适合提交材料的 1000 字内摘要。
-
-面试讲解用的更细学习资料保存在 Git 忽略的 `private-notes/`，不会进入公开仓库。
