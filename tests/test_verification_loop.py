@@ -151,7 +151,7 @@ def _final_response() -> ModelResponse:
 
 def _test_command() -> dict[str, object]:
     return {
-        "command": ["python", "-m", "pytest", "-q"],
+        "command": ["python", "-B", "-m", "pytest", "-q"],
         "cwd": ".",
         "timeout_seconds": 30,
     }
